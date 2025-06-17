@@ -6,7 +6,7 @@
 // Button pins
 #define BTN_FWD_PIN     33
 #define BTN_BCK_PIN     27
-#define BTN_MENU_PIN    22
+#define BTN_MENU_PIN    32
 
 // Button actions
 typedef enum {

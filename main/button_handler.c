@@ -66,7 +66,6 @@ esp_err_t button_handler_init(void) {
 
 // Process button states and return the appropriate action
 button_action_t button_handler_get_action(void) {
-    button_action_t action = BTN_ACTION_NONE;
     unsigned long current_time = pdTICKS_TO_MS(xTaskGetTickCount());
     
     // MUST call loop() first to update button states
