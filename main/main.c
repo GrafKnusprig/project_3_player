@@ -64,8 +64,8 @@ static void button_task(void *arg) {
                 break;
         }
         
-        // Small delay to prevent CPU hogging
-        vTaskDelay(pdMS_TO_TICKS(50));
+        // Small delay to prevent CPU hogging - keeping this short for responsive button handling
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
