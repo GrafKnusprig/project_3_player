@@ -1,7 +1,7 @@
 #include "neopixel.h"
 #include <stdlib.h>
 #include <string.h>
-#include "driver/rmt.h"
+#include "driver/rmt_tx.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -9,82 +9,152 @@
 
 static const char *TAG = "neopixel";
 
-// NeoPixel configuration
-#define RMT_TX_CHANNEL RMT_CHANNEL_0
-#define RMT_CLK_DIV 8    // RMT clock divider
+// NeoPixel WS2812 timing parameters
+#define WS2812_T0H_NS 350    // 0 bit high time
+#define WS2812_T0L_NS 900    // 0 bit low time
+#define WS2812_T1H_NS 900    // 1 bit high time
+#define WS2812_T1L_NS 350    // 1 bit low time
+#define WS2812_RESET_US 80   // Reset time in microseconds
 
-// Calculate RMT tick value for 10ns (ensure we never divide by zero)
-// ESP32 base clock is 80MHz and after dividing by RMT_CLK_DIV (8) we get 10MHz
-// So one tick is 100ns, and 10ns is 0.1 ticks
-#define RMT_TICK_10_NS 0.1f   // Each tick is 100ns, so 10ns is 0.1 ticks
+// RMT transmitter handle
+static rmt_channel_handle_t led_chan = NULL;
+static rmt_encoder_handle_t led_encoder = NULL;
 
-#define WS2812_T0H_NS 350                                  // 0 bit high time
-#define WS2812_T0L_NS 900                                  // 0 bit low time
-#define WS2812_T1H_NS 900                                  // 1 bit high time
-#define WS2812_T1L_NS 350                                  // 1 bit low time
-
-// Derived timing parameters (using direct calculation to avoid division by small values)
-#define WS2812_T0H_TICKS 4   // (350ns / 100ns per tick = ~4 ticks)
-#define WS2812_T0L_TICKS 9   // (900ns / 100ns per tick = ~9 ticks)
-#define WS2812_T1H_TICKS 9   // (900ns / 100ns per tick = ~9 ticks)
-#define WS2812_T1L_TICKS 4   // (350ns / 100ns per tick = ~4 ticks)
-
-// Mode colors
+// Mode colors with reduced brightness for comfort
 static const rgb_color_t mode_colors[MODE_MAX] = {
-    {255, 0, 0},     // Red - MODE_PLAY_ALL_ORDER
-    {0, 255, 0},     // Green - MODE_PLAY_ALL_SHUFFLE
-    {0, 0, 255},     // Blue - MODE_PLAY_FOLDER_ORDER
-    {255, 255, 0}    // Yellow - MODE_PLAY_FOLDER_SHUFFLE
+    {50, 0, 0},     // Red - MODE_PLAY_ALL_ORDER
+    {0, 50, 0},     // Green - MODE_PLAY_ALL_SHUFFLE
+    {0, 0, 50},     // Blue - MODE_PLAY_FOLDER_ORDER
+    {50, 50, 0}    // Yellow - MODE_PLAY_FOLDER_SHUFFLE
 };
 
-// Function to convert RGB values to NeoPixel RMT format
-static void neopixel_set_pixel(rmt_item32_t *items, rgb_color_t color) {
-    uint32_t bits = (color.green << 16) | (color.red << 8) | color.blue; // GRB format for WS2812
+// Global brightness setting (0-100%)
+static uint8_t neopixel_brightness = 20; // 20% brightness by default
+
+// Function to scale RGB values by brightness
+static rgb_color_t neopixel_scale_brightness(rgb_color_t color) {
+    rgb_color_t scaled;
+    scaled.red = (color.red * neopixel_brightness) / 100;
+    scaled.green = (color.green * neopixel_brightness) / 100;
+    scaled.blue = (color.blue * neopixel_brightness) / 100;
+    return scaled;
+}
+
+// WS2812 byte-level encoder that encodes RGB data into RMT symbols
+typedef struct {
+    rmt_encoder_t base;
+    rmt_encoder_t *bytes_encoder;
+    uint32_t bit0_duration_0;
+    uint32_t bit0_duration_1;
+    uint32_t bit1_duration_0;
+    uint32_t bit1_duration_1;
+} ws2812_encoder_t;
+
+static size_t ws2812_encode(rmt_encoder_t *encoder, rmt_channel_handle_t channel, const void *data, size_t data_size, rmt_encode_state_t *ret_state) {
+    ws2812_encoder_t *ws2812_encoder = __containerof(encoder, ws2812_encoder_t, base);
+    rmt_encoder_handle_t bytes_encoder = ws2812_encoder->bytes_encoder;
     
-    for (int i = 0; i < 24; i++) {
-        if (bits & (1 << (23 - i))) {
-            items[i].level0 = 1;
-            items[i].duration0 = WS2812_T1H_TICKS;
-            items[i].level1 = 0;
-            items[i].duration1 = WS2812_T1L_TICKS;
-        } else {
-            items[i].level0 = 1;
-            items[i].duration0 = WS2812_T0H_TICKS;
-            items[i].level1 = 0;
-            items[i].duration1 = WS2812_T0L_TICKS;
-        }
+    // Convert RGB values to required format
+    rmt_encode_state_t session_state = {};  // Initialize with zeros
+    size_t encoded_symbols = bytes_encoder->encode(bytes_encoder, channel, data, data_size, &session_state);
+    
+    *ret_state = session_state;
+    return encoded_symbols;
+}
+
+static esp_err_t ws2812_encoder_reset(rmt_encoder_t *encoder) {
+    ws2812_encoder_t *ws2812_encoder = __containerof(encoder, ws2812_encoder_t, base);
+    rmt_encoder_handle_t bytes_encoder = ws2812_encoder->bytes_encoder;
+    return bytes_encoder->reset(bytes_encoder);
+}
+
+static esp_err_t ws2812_encoder_delete(rmt_encoder_t *encoder) {
+    ws2812_encoder_t *ws2812_encoder = __containerof(encoder, ws2812_encoder_t, base);
+    rmt_encoder_handle_t bytes_encoder = ws2812_encoder->bytes_encoder;
+    esp_err_t ret = rmt_del_encoder(bytes_encoder);
+    free(ws2812_encoder);
+    return ret;
+}
+
+// Create a custom WS2812 encoder
+static esp_err_t create_ws2812_encoder(rmt_encoder_handle_t *ret_encoder) {
+    esp_err_t ret = ESP_OK;
+    
+    // Allocate encoder structure
+    ws2812_encoder_t *ws2812_encoder = calloc(1, sizeof(ws2812_encoder_t));
+    if (!ws2812_encoder) {
+        return ESP_ERR_NO_MEM;
     }
     
-    // Reset code - not needed as rmt_write_items will append it
+    // Configure encoder
+    // Calculate duration in clock ticks based on the resolution (10MHz = 0.1μs per tick)
+    // 350ns = 3.5 ticks, 900ns = 9 ticks
+    
+    rmt_bytes_encoder_config_t bytes_encoder_config = {
+        .bit0 = {
+            .duration0 = 4, // 350ns -> ~4 ticks at 10MHz
+            .level0 = 1,
+            .duration1 = 9, // 900ns -> ~9 ticks at 10MHz
+            .level1 = 0,
+        },
+        .bit1 = {
+            .duration0 = 9, // 900ns -> ~9 ticks at 10MHz
+            .level0 = 1,
+            .duration1 = 4, // 350ns -> ~4 ticks at 10MHz
+            .level1 = 0,
+        },
+        .flags = {
+            .msb_first = 1 // WS2812 transmits MSB first
+        }
+    };
+    
+    // Create bytes encoder
+    ret = rmt_new_bytes_encoder(&bytes_encoder_config, &ws2812_encoder->bytes_encoder);
+    if (ret != ESP_OK) {
+        free(ws2812_encoder);
+        return ret;
+    }
+    
+    ws2812_encoder->base.encode = ws2812_encode;
+    ws2812_encoder->base.reset = ws2812_encoder_reset;
+    ws2812_encoder->base.del = ws2812_encoder_delete;
+    
+    *ret_encoder = &ws2812_encoder->base;
+    return ESP_OK;
 }
 
 esp_err_t neopixel_init(void) {
     ESP_LOGI(TAG, "Initializing NeoPixel");
     
-    // RMT configuration
-    rmt_config_t config = {
-        .rmt_mode = RMT_MODE_TX,
-        .channel = RMT_TX_CHANNEL,
+    // RMT TX channel configuration
+    rmt_tx_channel_config_t tx_chan_config = {
         .gpio_num = NEOPIXEL_PIN,
-        .clk_div = RMT_CLK_DIV,
-        .mem_block_num = 1,
-        .tx_config = {
-            .loop_en = false,
-            .carrier_en = false,
-            .idle_output_en = true,
-            .idle_level = 0
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10000000, // 10MHz (100ns per tick)
+        .mem_block_symbols = 64,   // Memory blocks for channel
+        .trans_queue_depth = 4,    // TX queue depth
+        .flags = {
+            .invert_out = false    // No signal inversion
         }
     };
     
-    esp_err_t ret = rmt_config(&config);
+    esp_err_t ret = rmt_new_tx_channel(&tx_chan_config, &led_chan);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure RMT");
+        ESP_LOGE(TAG, "Failed to create RMT TX channel: %d", ret);
         return ret;
     }
     
-    ret = rmt_driver_install(config.channel, 0, 0);
+    // Create WS2812 encoder
+    ret = create_ws2812_encoder(&led_encoder);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to install RMT driver");
+        ESP_LOGE(TAG, "Failed to create encoder: %d", ret);
+        return ret;
+    }
+    
+    // Enable the RMT TX channel
+    ret = rmt_enable(led_chan);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable RMT channel: %d", ret);
         return ret;
     }
     
@@ -93,14 +163,29 @@ esp_err_t neopixel_init(void) {
 }
 
 esp_err_t neopixel_set_color(rgb_color_t color) {
-    // Create RMT items
-    rmt_item32_t items[24];
-    neopixel_set_pixel(items, color);
+    // Scale color by brightness
+    rgb_color_t scaled_color = neopixel_scale_brightness(color);
     
-    // Send the items to RMT TX channel
-    esp_err_t ret = rmt_write_items(RMT_TX_CHANNEL, items, 24, true);
+    // WS2812 expects GRB format, but we need to swap red and green based on observation
+    // that "red shows as green and green shows as red"
+    uint8_t led_data[3] = {
+        scaled_color.red,      // Red (was green in old code)
+        scaled_color.green,    // Green (was red in old code) 
+        scaled_color.blue      // Blue
+    };
+    
+    // Configuration for sending RMT TX data
+    rmt_transmit_config_t tx_config = {
+        .loop_count = 0,     // No loop
+        .flags = {
+            .eot_level = 0   // Set output level to low after transmission
+        }
+    };
+    
+    // Send data using RMT
+    esp_err_t ret = rmt_transmit(led_chan, led_encoder, led_data, sizeof(led_data), &tx_config);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send RMT items");
+        ESP_LOGE(TAG, "Failed to transmit RMT data: %d", ret);
     }
     
     return ret;
