@@ -207,6 +207,25 @@ esp_err_t audio_player_stop(void) {
     return ESP_OK;
 }
 
+esp_err_t audio_player_seek(size_t byte_pos) {
+    if (current_pcm_file.file == NULL) {
+        ESP_LOGW(TAG, "No file is currently open for seeking");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = pcm_file_seek(&current_pcm_file, byte_pos);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to seek to position %zu", byte_pos);
+        return ret;
+    }
+
+    // Save state after seeking
+    audio_player_save_state();
+
+    ESP_LOGI(TAG, "Seeked to byte position %zu", byte_pos);
+    return ESP_OK;
+}
+
 esp_err_t audio_player_next(void) {
     if (player_cmd_queue == NULL) {
         return ESP_ERR_INVALID_STATE;

@@ -35,12 +35,10 @@ static void button_task(void *arg) {
                 
             case BTN_ACTION_RESTART_TRACK:
                 ESP_LOGI(TAG, "Restart track button pressed");
-                // Restart the current file by reopening it
+                // Seek to the beginning of the current file
                 player_state_t state_restart = audio_player_get_state();
                 if (strlen(state_restart.current_file_path) > 0) {
-                    audio_player_stop();
-                    vTaskDelay(pdMS_TO_TICKS(100)); // Small delay to ensure stop
-                    audio_player_start();
+                    audio_player_seek(0); // Seek to start of file
                 }
                 break;
                 

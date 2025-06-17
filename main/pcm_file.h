@@ -61,4 +61,13 @@ esp_err_t pcm_file_read(pcm_file_t *pcm_file, void *buffer, size_t buffer_size, 
  */
 pcm_header_t pcm_file_get_header(pcm_file_t *pcm_file);
 
+/**
+ * @brief Seek to a specific byte position in the PCM data section
+ * 
+ * @param pcm_file PCM file handle
+ * @param byte_pos Byte position relative to start of PCM data (not header)
+ * @return ESP_OK on success
+ */
+esp_err_t pcm_file_seek(pcm_file_t *pcm_file, uint32_t byte_pos);
+
 #endif // PCM_FILE_H

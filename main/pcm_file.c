@@ -52,6 +52,26 @@ esp_err_t pcm_file_open(const char *filepath, pcm_file_t *pcm_file) {
     return ESP_OK;
 }
 
+esp_err_t pcm_file_seek(pcm_file_t *pcm_file, uint32_t byte_pos) {
+    if (pcm_file == NULL || pcm_file->file == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    long header_size = (long)sizeof(pcm_header_t);
+    long seek_pos = header_size + (long)byte_pos;
+
+    if (fseek(pcm_file->file, seek_pos, SEEK_SET) != 0) {
+        ESP_LOGE(TAG, "Failed to seek to byte position %u in PCM file (errno: %d)", byte_pos, errno);
+        return ESP_FAIL;
+    }
+
+    pcm_file->position = byte_pos;
+
+    ESP_LOGI(TAG, "PCM file seek: byte_pos=%u, new position=%ld", byte_pos, pcm_file->position);
+
+    return ESP_OK;
+}
+
 esp_err_t pcm_file_close(pcm_file_t *pcm_file) {
     if (pcm_file == NULL || pcm_file->file == NULL) {
         return ESP_ERR_INVALID_ARG;

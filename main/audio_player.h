@@ -101,4 +101,12 @@ esp_err_t audio_player_save_state(void);
  */
 esp_err_t audio_player_load_state(void);
 
+/**
+ * @brief Seek to a specific position in the current track
+ * 
+ * @param byte_position Position to seek to, in bytes
+ * @return ESP_OK on success
+ */
+esp_err_t audio_player_seek(size_t byte_position);
+
 #endif // AUDIO_PLAYER_H
