@@ -1,0 +1,46 @@
+# Build directory
+build/
+
+# Generated binary files
+*.bin
+*.elf
+*.map
+
+# ESP-IDF specific
+sdkconfig.old
+sdkconfig.ci
+dependencies.lock
+
+# Editor specific
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Compiled Object files
+*.o
+*.obj
+*.a
+*.lib
+
+# Temporary files
+*.bak
+
+# Log files
+*.log
+
+# Linker output
+*.ilk
+*.exp
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
