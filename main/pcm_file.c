@@ -1,7 +1,9 @@
 #include "pcm_file.h"
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 #include "esp_log.h"
+#include "sd_card.h" // Add for path resolution
 
 static const char *TAG = "pcm_file";
 
@@ -10,10 +12,14 @@ esp_err_t pcm_file_open(const char *filepath, pcm_file_t *pcm_file) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Open the file
+    ESP_LOGI(TAG, "Opening PCM file: %s", filepath);
+    
+    // Open the file directly
     pcm_file->file = fopen(filepath, "rb");
+    
+    // Check if we have an open file
     if (pcm_file->file == NULL) {
-        ESP_LOGE(TAG, "Failed to open PCM file: %s", filepath);
+        ESP_LOGE(TAG, "Failed to open PCM file: %s (errno: %d)", filepath, errno);
         return ESP_FAIL;
     }
 

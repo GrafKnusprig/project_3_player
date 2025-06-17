@@ -23,7 +23,3 @@ fi
 # Build the project using ESP-IDF build system
 echo "Building project..."
 idf.py build
-
-echo "Build completed successfully!"
-echo ""
-echo "To flash the firmware, run: ./flash.sh"

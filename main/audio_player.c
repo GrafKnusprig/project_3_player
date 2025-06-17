@@ -2,6 +2,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <errno.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -121,13 +124,25 @@ esp_err_t audio_player_init(void) {
     
     // Parse index.json file
     char index_path[256];
-    snprintf(index_path, sizeof(index_path), "%s/ESP32_MUSIC/index.json", sd_card_get_mount_point());
+    const char* mount_point = sd_card_get_mount_point();
     
+    // Debug print the mount point
+    ESP_LOGI(TAG, "SD card mount point: %s", mount_point);
+    
+    // Use the proper long filename with the standard mount point
+    snprintf(index_path, sizeof(index_path), "%s/ESP32_MUSIC/index.json", mount_point);
+    
+    ESP_LOGI(TAG, "Looking for index file at: %s", index_path);
+    
+    // Parse the index file
     ret = json_parse_index(index_path, &music_index);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to parse index.json file");
-        i2s_driver_uninstall(I2S_PORT);
-        return ret;
+        ESP_LOGE(TAG, "Failed to parse index.json file - continuing without index");
+        // Initialize an empty index to avoid null pointers
+        memset(&music_index, 0, sizeof(index_file_t));
+        // Don't return error - we'll continue without index
+    } else {
+        ESP_LOGI(TAG, "Successfully loaded index with %d files", music_index.total_files);
     }
     
     // Create command queue
@@ -327,11 +342,16 @@ static void player_task(void *arg) {
     // If we have a saved file path, try to play it
     if (strlen(player_state.current_file_path) > 0) {
         play_file(player_state.current_file_path);
-    } else if (music_index.total_files > 0) {
+    } else if (music_index.total_files > 0 && music_index.all_files != NULL) {
         // Otherwise, start with first file
         char full_path[256];
         json_get_full_path(music_index.all_files[0].path, full_path, sizeof(full_path));
         play_file(full_path);
+    } else {
+        ESP_LOGW(TAG, "No music files in index - waiting for user action");
+        // Set state to show we're not currently playing anything
+        player_state.is_playing = false;
+        memset(player_state.current_file_path, 0, sizeof(player_state.current_file_path));
     }
     
     // Task loop
@@ -474,8 +494,8 @@ static esp_err_t play_file(const char *filepath) {
 // Select and play next file based on current mode
 static esp_err_t select_next_file(bool random_mode) {
     // No files in index
-    if (music_index.total_files == 0) {
-        ESP_LOGW(TAG, "No files in index");
+    if (music_index.total_files == 0 || music_index.all_files == NULL) {
+        ESP_LOGW(TAG, "No files in index or all_files is NULL");
         return ESP_FAIL;
     }
     
@@ -490,6 +510,13 @@ static esp_err_t select_next_file(bool random_mode) {
         } else {
             // Play next file in sequence
             player_state.current_file_index = (player_state.current_file_index + 1) % music_index.total_files;
+        }
+        
+        // Check bounds to prevent crashes
+        if (player_state.current_file_index < 0 || player_state.current_file_index >= music_index.total_files) {
+            ESP_LOGE(TAG, "Invalid file index: %d (max: %d)", 
+                player_state.current_file_index, music_index.total_files - 1);
+            player_state.current_file_index = 0;  // Reset to first file
         }
         
         // Get file path

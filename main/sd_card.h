@@ -46,4 +46,20 @@ esp_err_t sd_card_write_file(const char *filepath, const void *data, size_t len)
  */
 esp_err_t sd_card_read_file(const char *filepath, void *data, size_t max_len, size_t *bytes_read);
 
+/**
+ * @brief Check if a file exists on the SD card
+ * 
+ * @param path Path to check
+ * @return true if file exists, false otherwise
+ */
+bool sd_card_file_exists(const char *path);
+
+/**
+ * @brief List all files in a directory and print them for debugging
+ * 
+ * @param dir_path Directory path to list
+ * @return ESP_OK on success
+ */
+esp_err_t sd_card_list_dir(const char *dir_path);
+
 #endif // SD_CARD_H

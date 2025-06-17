@@ -115,8 +115,8 @@ void app_main(void)
         neopixel_indicate_mode(state.mode);
     }
     
-    // Create button polling task
-    xTaskCreate(button_task, "button_task", 2048, NULL, 5, NULL);
+    // Create button polling task with larger stack size to prevent overflow
+    xTaskCreate(button_task, "button_task", 4096, NULL, 5, NULL);
     
     ESP_LOGI(TAG, "Initialization complete");
 }

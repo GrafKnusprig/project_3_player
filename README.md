@@ -22,6 +22,32 @@ This project implements an ESP32-based music player with a PCM5102 DAC for audio
   - Previous track / Restart current track
   - Next folder / Previous folder
 - Persistent state (mode and current track) saved to SD card
+- Long filename support for the FAT filesystem
+
+## SD Card Setup
+The player expects the following structure on the SD card:
+```
+/
+└── ESP32_MUSIC/
+    ├── index.json        - Index file with all tracks and folders
+    ├── player_state.bin  - Persistent state file (auto-created)
+    └── [music files]     - PCM audio files
+```
+
+The `index.json` file should contain information about all available music files and folders.
+
+## Long Filename Support
+The firmware is configured to use long filenames with the FAT filesystem. To ensure this feature is enabled:
+
+1. Run the provided script:
+   ```
+   ./enable_fatfs_long_filenames.sh
+   ```
+
+2. This script will:
+   - Enable the CONFIG_FATFS_LONG_FILENAMES option in menuconfig
+   - Rebuild the project with long filename support
+   - Allow the firmware to correctly read files with names longer than the 8.3 format
 
 ## Pin Configuration
 

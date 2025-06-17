@@ -2,6 +2,8 @@
 #include <string.h>
 #include <sys/unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <errno.h>
 #include "esp_vfs_fat.h"
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
@@ -72,6 +74,7 @@ bool sd_card_is_mounted(void) {
 }
 
 const char* sd_card_get_mount_point(void) {
+    ESP_LOGI(TAG, "Returning mount point: %s", MOUNT_POINT);
     return MOUNT_POINT;
 }
 
@@ -121,3 +124,54 @@ esp_err_t sd_card_read_file(const char *filepath, void *data, size_t max_len, si
 
     return ESP_OK;
 }
+
+bool sd_card_file_exists(const char *path) {
+    if (!is_mounted) {
+        return false;
+    }
+    
+    char full_path[256];
+    
+    // If path already starts with the mount point, use it directly
+    if (strncmp(path, MOUNT_POINT, strlen(MOUNT_POINT)) == 0) {
+        strncpy(full_path, path, sizeof(full_path) - 1);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s%s", MOUNT_POINT, path);
+    }
+    
+    struct stat st;
+    return (stat(full_path, &st) == 0);
+}
+
+esp_err_t sd_card_list_dir(const char *dir_path) {
+    if (!is_mounted) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    char full_path[256];
+    
+    // If path already starts with the mount point, use it directly
+    if (strncmp(dir_path, MOUNT_POINT, strlen(MOUNT_POINT)) == 0) {
+        strncpy(full_path, dir_path, sizeof(full_path) - 1);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s%s", MOUNT_POINT, dir_path);
+    }
+    
+    ESP_LOGI(TAG, "Listing directory: %s", full_path);
+    
+    DIR *dir = opendir(full_path);
+    if (!dir) {
+        ESP_LOGE(TAG, "Failed to open directory (errno: %d)", errno);
+        return ESP_FAIL;
+    }
+    
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        ESP_LOGI(TAG, "  %s", entry->d_name);
+    }
+    
+    closedir(dir);
+    return ESP_OK;
+}
+
+// sd_card_resolve_path has been removed as we're using long filenames with FATFS
