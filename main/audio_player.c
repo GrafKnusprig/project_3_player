@@ -82,12 +82,16 @@ esp_err_t audio_player_init(void) {
         return ESP_FAIL;
     }
 
-    // Initialize player state
-    player_state.mode = MODE_PLAY_ALL_ORDER;  // Default mode
-    player_state.current_file_index = 0;
-    player_state.current_folder_index = 0;
-    player_state.is_playing = false;
-    memset(player_state.current_file_path, 0, sizeof(player_state.current_file_path));
+    // Try to load state first
+    esp_err_t state_ret = audio_player_load_state();
+    if (state_ret != ESP_OK) {
+        // If load failed, set defaults
+        player_state.mode = MODE_PLAY_ALL_ORDER;
+        player_state.current_file_index = 0;
+        player_state.current_folder_index = 0;
+        player_state.is_playing = false;
+        memset(player_state.current_file_path, 0, sizeof(player_state.current_file_path));
+    }
 
     // Initialize I2S for audio output (fixed for ESP-IDF v5+)
     i2s_std_config_t std_cfg = {
@@ -187,9 +191,6 @@ esp_err_t audio_player_init(void) {
         return ESP_ERR_NO_MEM;
     }
 
-    // Load state if available
-    audio_player_load_state();
-    
     ESP_LOGI(TAG, "Audio player initialized successfully");
     return ESP_OK;
 }
@@ -233,9 +234,6 @@ esp_err_t audio_player_seek(size_t byte_pos) {
         ESP_LOGE(TAG, "Failed to seek to position %zu", byte_pos);
         return ret;
     }
-
-    // Save state after seeking
-    audio_player_save_state();
 
     ESP_LOGI(TAG, "Seeked to byte position %zu", byte_pos);
     return ESP_OK;
