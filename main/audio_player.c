@@ -65,7 +65,7 @@ typedef enum {
 // Forward declarations
 static void player_task(void *arg);
 static esp_err_t play_file(const char *filepath);
-static esp_err_t select_next_file(bool random_mode);
+static esp_err_t select_next_file(void);
 static esp_err_t select_prev_file(void);
 static esp_err_t select_next_folder(void);
 static esp_err_t select_prev_folder(void);
@@ -389,10 +389,7 @@ static void player_task(void *arg) {
                     
                 case CMD_NEXT:
                     ESP_LOGI(TAG, "Next command received");
-                    // Determine if we should use random mode
-                    bool random_mode = (player_state.mode == MODE_PLAY_ALL_SHUFFLE) || 
-                                    (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE);
-                    select_next_file(random_mode);
+                    select_next_file();
                     break;
                     
                 case CMD_PREV:
@@ -453,18 +450,12 @@ static void player_task(void *arg) {
                     // Close current file
                     pcm_file_close(&current_pcm_file);
                     
-                    // Determine if we should use random mode
-                    bool random_mode = (player_state.mode == MODE_PLAY_ALL_SHUFFLE) || 
-                                     (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE);
-                                     
                     // Play next file
-                    select_next_file(random_mode);
+                    select_next_file();
                 }
             } else {
                 // No file is open, try to find one to play
-                bool random_mode = (player_state.mode == MODE_PLAY_ALL_SHUFFLE) || 
-                                 (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE);
-                select_next_file(random_mode);
+                select_next_file();
                 
                 // Small delay to prevent CPU hogging if no file is found
                 vTaskDelay(pdMS_TO_TICKS(100));
@@ -511,15 +502,14 @@ static esp_err_t play_file(const char *filepath) {
 }
 
 // Select and play next file based on current mode
-static esp_err_t select_next_file(bool random_mode) {
+static esp_err_t select_next_file(void) {
     // No files in index
     if (music_index.total_files == 0 || music_index.all_files == NULL) {
         ESP_LOGW(TAG, "No files in index or all_files is NULL");
         return ESP_FAIL;
     }
-    
     char full_path[256];
-    
+    bool random_mode = (player_state.mode == MODE_PLAY_ALL_SHUFFLE) || (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE);
     // Handle different modes
     if (player_state.mode == MODE_PLAY_ALL_ORDER || player_state.mode == MODE_PLAY_ALL_SHUFFLE) {
         // All files mode
@@ -530,14 +520,12 @@ static esp_err_t select_next_file(bool random_mode) {
             // Play next file in sequence
             player_state.current_file_index = (player_state.current_file_index + 1) % music_index.total_files;
         }
-        
         // Check bounds to prevent crashes
         if (player_state.current_file_index < 0 || player_state.current_file_index >= music_index.total_files) {
             ESP_LOGE(TAG, "Invalid file index: %d (max: %d)", 
                 player_state.current_file_index, music_index.total_files - 1);
             player_state.current_file_index = 0;  // Reset to first file
         }
-        
         // Get file path
         json_get_full_path(music_index.all_files[player_state.current_file_index].path, 
                           full_path, sizeof(full_path));
@@ -548,14 +536,11 @@ static esp_err_t select_next_file(bool random_mode) {
             ESP_LOGW(TAG, "No folders or invalid folder index");
             return ESP_FAIL;
         }
-        
         folder_t *folder = &music_index.music_folders[player_state.current_folder_index];
-        
         if (folder->file_count == 0) {
             ESP_LOGW(TAG, "No files in folder");
             return ESP_FAIL;
         }
-        
         int file_idx;
         if (random_mode) {
             // Play random file in folder
@@ -564,13 +549,10 @@ static esp_err_t select_next_file(bool random_mode) {
             // Play next file in folder
             file_idx = (player_state.current_file_index + 1) % folder->file_count;
         }
-        
         player_state.current_file_index = file_idx;
-        
         // Get file path
         json_get_full_path(folder->files[file_idx].path, full_path, sizeof(full_path));
     }
-    
     // Play the file
     return play_file(full_path);
 }
