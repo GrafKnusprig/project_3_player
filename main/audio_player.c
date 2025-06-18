@@ -8,7 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-#include "driver/i2s.h"
+#include "driver/i2s_std.h"
 #include "esp_log.h"
 #include "sd_card.h"
 #include "pcm_file.h"
@@ -70,6 +70,9 @@ static esp_err_t select_prev_file(void);
 static esp_err_t select_next_folder(void);
 static esp_err_t select_prev_folder(void);
 
+// Add static handle for I2S TX channel
+static i2s_chan_handle_t i2s_tx_chan = NULL;
+
 esp_err_t audio_player_init(void) {
     ESP_LOGI(TAG, "Initializing audio player");
     
@@ -86,39 +89,45 @@ esp_err_t audio_player_init(void) {
     player_state.is_playing = false;
     memset(player_state.current_file_path, 0, sizeof(player_state.current_file_path));
 
-    // Initialize I2S for audio output
-    i2s_config_t i2s_config = {
-        .mode = I2S_MODE_MASTER | I2S_MODE_TX,
-        .sample_rate = I2S_SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE,
-        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = I2S_DMA_BUFFER_COUNT,
-        .dma_buf_len = I2S_DMA_BUFFER_LEN,
-        .use_apll = true,
-        .tx_desc_auto_clear = true,
-        .fixed_mclk = 0
+    // Initialize I2S for audio output (fixed for ESP-IDF v5+)
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = {
+            .sample_rate_hz = I2S_SAMPLE_RATE,
+            .clk_src = I2S_CLK_SRC_DEFAULT,
+            .mclk_multiple = I2S_MCLK_MULTIPLE_256
+        },
+        .slot_cfg = {
+            .data_bit_width = I2S_DATA_BIT_WIDTH_16BIT,
+            .slot_bit_width = I2S_SLOT_BIT_WIDTH_16BIT,
+            .slot_mode = I2S_SLOT_MODE_STEREO,
+            .slot_mask = I2S_STD_SLOT_BOTH,
+            .ws_width = I2S_SLOT_BIT_WIDTH_32BIT, // Use 32-bit WS width for standard I2S
+            .ws_pol = false,
+            .bit_shift = true // Enable bit shift for standard I2S
+        },
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = I2S_BCK_PIN,
+            .ws = I2S_LRCK_PIN,
+            .dout = I2S_DATA_PIN,
+            .din = I2S_GPIO_UNUSED
+        }
     };
-    
-    i2s_pin_config_t pin_config = {
-        .bck_io_num = I2S_BCK_PIN,
-        .ws_io_num = I2S_LRCK_PIN,
-        .data_out_num = I2S_DATA_PIN,
-        .data_in_num = I2S_PIN_NO_CHANGE
-    };
-    
-    // Install and configure I2S driver
-    esp_err_t ret = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
+    esp_err_t ret = i2s_new_channel(&chan_cfg, &i2s_tx_chan, NULL);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to install I2S driver");
+        ESP_LOGE(TAG, "Failed to create I2S TX channel");
         return ret;
     }
-    
-    ret = i2s_set_pin(I2S_PORT, &pin_config);
+    ret = i2s_channel_init_std_mode(i2s_tx_chan, &std_cfg);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set I2S pins");
-        i2s_driver_uninstall(I2S_PORT);
+        ESP_LOGE(TAG, "Failed to initialize I2S standard channel");
+        return ret;
+    }
+    // Enable the I2S TX channel
+    ret = i2s_channel_enable(i2s_tx_chan);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable I2S TX channel");
         return ret;
     }
     
@@ -150,7 +159,10 @@ esp_err_t audio_player_init(void) {
     if (player_cmd_queue == NULL) {
         ESP_LOGE(TAG, "Failed to create player command queue");
         json_free_index(&music_index);
-        i2s_driver_uninstall(I2S_PORT);
+        if (i2s_tx_chan) {
+            i2s_del_channel(i2s_tx_chan);
+            i2s_tx_chan = NULL;
+        }
         return ESP_ERR_NO_MEM;
     }
     
@@ -168,7 +180,10 @@ esp_err_t audio_player_init(void) {
         ESP_LOGE(TAG, "Failed to create player task");
         vQueueDelete(player_cmd_queue);
         json_free_index(&music_index);
-        i2s_driver_uninstall(I2S_PORT);
+        if (i2s_tx_chan) {
+            i2s_del_channel(i2s_tx_chan);
+            i2s_tx_chan = NULL;
+        }
         return ESP_ERR_NO_MEM;
     }
 
@@ -434,7 +449,10 @@ static void player_task(void *arg) {
                 if (ret == ESP_OK && bytes_read > 0) {
                     // Write data to I2S
                     size_t bytes_written = 0;
-                    i2s_write(I2S_PORT, audio_buffer, bytes_read, &bytes_written, portMAX_DELAY);
+                    esp_err_t i2s_ret = i2s_channel_write(i2s_tx_chan, audio_buffer, bytes_read, &bytes_written, portMAX_DELAY);
+                    if (i2s_ret != ESP_OK) {
+                        ESP_LOGE(TAG, "i2s_channel_write failed: %d", i2s_ret);
+                    }
                     
                     // Check if all bytes were written
                     if (bytes_written != bytes_read) {
