@@ -49,6 +49,13 @@ static QueueHandle_t player_cmd_queue = NULL;
 // Random seed initialized
 static bool random_seed_initialized = false;
 
+// Shuffle state
+static int *shuffle_indices = NULL;
+static int shuffle_count = 0;
+static int shuffle_pos = 0;
+// Forward declaration for shuffle list update
+static void update_shuffle_list(void);
+
 // Player commands
 typedef enum {
     CMD_NONE = 0,
@@ -299,15 +306,13 @@ esp_err_t audio_player_set_mode(playback_mode_t mode) {
     if (mode >= MODE_MAX) {
         return ESP_ERR_INVALID_ARG;
     }
-    
     player_state.mode = mode;
-    
+    // Update shuffle list if entering a shuffle mode
+    update_shuffle_list();
     // Indicate mode with NeoPixel
     neopixel_indicate_mode(mode);
-    
     // Save state
     audio_player_save_state();
-    
     return ESP_OK;
 }
 
@@ -376,9 +381,12 @@ static void player_task(void *arg) {
     
     // If we have a saved file path, try to play it
     if (strlen(player_state.current_file_path) > 0) {
+        // If shuffle mode, regenerate shuffle list
+        update_shuffle_list();
         play_file(player_state.current_file_path);
     } else if (music_index.total_files > 0 && music_index.all_files != NULL) {
         // Otherwise, start with first file
+        update_shuffle_list();
         char full_path[256];
         json_get_full_path(music_index.all_files[0].path, full_path, sizeof(full_path));
         play_file(full_path);
@@ -537,38 +545,82 @@ static void update_current_folder_index_for_file(const char *filepath) {
     }
 }
 
+// Helper to free shuffle indices
+static void free_shuffle_indices(void) {
+    if (shuffle_indices) {
+        free(shuffle_indices);
+        shuffle_indices = NULL;
+        shuffle_count = 0;
+        shuffle_pos = 0;
+    }
+}
+
+// Fisher-Yates shuffle
+static void shuffle_array(int *array, int n) {
+    for (int i = n - 1; i > 0; --i) {
+        int j = rand() % (i + 1);
+        int tmp = array[i];
+        array[i] = array[j];
+        array[j] = tmp;
+    }
+}
+
+// Generate shuffle list for all files
+static void generate_shuffle_all(void) {
+    free_shuffle_indices();
+    if (music_index.total_files <= 0) return;
+    shuffle_count = music_index.total_files;
+    shuffle_indices = malloc(sizeof(int) * shuffle_count);
+    for (int i = 0; i < shuffle_count; ++i) shuffle_indices[i] = i;
+    shuffle_array(shuffle_indices, shuffle_count);
+    shuffle_pos = 0;
+}
+
+// Generate shuffle list for current folder
+static void generate_shuffle_folder(void) {
+    free_shuffle_indices();
+    if (music_index.folder_count == 0 || player_state.current_folder_index >= music_index.folder_count) return;
+    folder_t *folder = &music_index.music_folders[player_state.current_folder_index];
+    if (folder->file_count <= 0) return;
+    shuffle_count = folder->file_count;
+    shuffle_indices = malloc(sizeof(int) * shuffle_count);
+    for (int i = 0; i < shuffle_count; ++i) shuffle_indices[i] = i;
+    shuffle_array(shuffle_indices, shuffle_count);
+    shuffle_pos = 0;
+}
+
+// Call this whenever mode is set or folder changes
+static void update_shuffle_list(void) {
+    if (player_state.mode == MODE_PLAY_ALL_SHUFFLE) {
+        generate_shuffle_all();
+    } else if (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE) {
+        generate_shuffle_folder();
+    } else {
+        free_shuffle_indices();
+    }
+}
+
 // Select and play next file based on current mode
 static esp_err_t select_next_file(void) {
-    // No files in index
     if (music_index.total_files == 0 || music_index.all_files == NULL) {
         ESP_LOGW(TAG, "No files in index or all_files is NULL");
         return ESP_FAIL;
     }
     char full_path[256];
     bool random_mode = (player_state.mode == MODE_PLAY_ALL_SHUFFLE) || (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE);
-    // Handle different modes
-    if (player_state.mode == MODE_PLAY_ALL_ORDER || player_state.mode == MODE_PLAY_ALL_SHUFFLE) {
-        // All files mode
-        if (random_mode) {
-            // Play random file
-            player_state.current_file_index = rand() % music_index.total_files;
-        } else {
-            // Play next file in sequence
-            player_state.current_file_index = (player_state.current_file_index + 1) % music_index.total_files;
+    if (player_state.mode == MODE_PLAY_ALL_ORDER) {
+        // All files in order
+        player_state.current_file_index = (player_state.current_file_index + 1) % music_index.total_files;
+        json_get_full_path(music_index.all_files[player_state.current_file_index].path, full_path, sizeof(full_path));
+    } else if (player_state.mode == MODE_PLAY_ALL_SHUFFLE) {
+        if (!shuffle_indices || shuffle_count != music_index.total_files) {
+            generate_shuffle_all();
         }
-        // Check bounds to prevent crashes
-        if (player_state.current_file_index < 0 || player_state.current_file_index >= music_index.total_files) {
-            ESP_LOGE(TAG, "Invalid file index: %d (max: %d)", 
-                player_state.current_file_index, music_index.total_files - 1);
-            player_state.current_file_index = 0;  // Reset to first file
-        }
-        // Get file path
-        json_get_full_path(music_index.all_files[player_state.current_file_index].path, 
-                          full_path, sizeof(full_path));
-    } else {
-        // Folder mode
-        if (music_index.folder_count == 0 || 
-            player_state.current_folder_index >= music_index.folder_count) {
+        shuffle_pos = (shuffle_pos + 1) % shuffle_count;
+        player_state.current_file_index = shuffle_indices[shuffle_pos];
+        json_get_full_path(music_index.all_files[player_state.current_file_index].path, full_path, sizeof(full_path));
+    } else if (player_state.mode == MODE_PLAY_FOLDER_ORDER) {
+        if (music_index.folder_count == 0 || player_state.current_folder_index >= music_index.folder_count) {
             ESP_LOGW(TAG, "No folders or invalid folder index");
             return ESP_FAIL;
         }
@@ -577,68 +629,72 @@ static esp_err_t select_next_file(void) {
             ESP_LOGW(TAG, "No files in folder");
             return ESP_FAIL;
         }
-        int file_idx;
-        if (random_mode) {
-            // Play random file in folder
-            file_idx = rand() % folder->file_count;
-        } else {
-            // Play next file in folder
-            file_idx = (player_state.current_file_index + 1) % folder->file_count;
+        player_state.current_file_index = (player_state.current_file_index + 1) % folder->file_count;
+        json_get_full_path(folder->files[player_state.current_file_index].path, full_path, sizeof(full_path));
+    } else if (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE) {
+        if (music_index.folder_count == 0 || player_state.current_folder_index >= music_index.folder_count) {
+            ESP_LOGW(TAG, "No folders or invalid folder index");
+            return ESP_FAIL;
         }
-        player_state.current_file_index = file_idx;
-        // Get file path
-        json_get_full_path(folder->files[file_idx].path, full_path, sizeof(full_path));
+        folder_t *folder = &music_index.music_folders[player_state.current_folder_index];
+        if (!shuffle_indices || shuffle_count != folder->file_count) {
+            generate_shuffle_folder();
+        }
+        shuffle_pos = (shuffle_pos + 1) % shuffle_count;
+        player_state.current_file_index = shuffle_indices[shuffle_pos];
+        json_get_full_path(folder->files[player_state.current_file_index].path, full_path, sizeof(full_path));
+    } else {
+        ESP_LOGW(TAG, "Unknown mode");
+        return ESP_FAIL;
     }
-    // Play the file
     return play_file(full_path);
 }
 
 // Select and play previous file
 static esp_err_t select_prev_file(void) {
-    // No files in index
     if (music_index.total_files == 0) {
         ESP_LOGW(TAG, "No files in index");
         return ESP_FAIL;
     }
-    
     char full_path[256];
-    
-    // Handle different modes
-    if (player_state.mode == MODE_PLAY_ALL_ORDER || player_state.mode == MODE_PLAY_ALL_SHUFFLE) {
-        // All files mode - always sequential for prev
-        player_state.current_file_index = (player_state.current_file_index == 0) ? 
-                                        (music_index.total_files - 1) : 
-                                        (player_state.current_file_index - 1);
-        
-        // Get file path
-        json_get_full_path(music_index.all_files[player_state.current_file_index].path, 
-                          full_path, sizeof(full_path));
-    } else {
-        // Folder mode
-        if (music_index.folder_count == 0 || 
-            player_state.current_folder_index >= music_index.folder_count) {
+    if (player_state.mode == MODE_PLAY_ALL_ORDER) {
+        player_state.current_file_index = (player_state.current_file_index == 0) ? (music_index.total_files - 1) : (player_state.current_file_index - 1);
+        json_get_full_path(music_index.all_files[player_state.current_file_index].path, full_path, sizeof(full_path));
+    } else if (player_state.mode == MODE_PLAY_ALL_SHUFFLE) {
+        if (!shuffle_indices || shuffle_count != music_index.total_files) {
+            generate_shuffle_all();
+        }
+        shuffle_pos = (shuffle_pos == 0) ? (shuffle_count - 1) : (shuffle_pos - 1);
+        player_state.current_file_index = shuffle_indices[shuffle_pos];
+        json_get_full_path(music_index.all_files[player_state.current_file_index].path, full_path, sizeof(full_path));
+    } else if (player_state.mode == MODE_PLAY_FOLDER_ORDER) {
+        if (music_index.folder_count == 0 || player_state.current_folder_index >= music_index.folder_count) {
             ESP_LOGW(TAG, "No folders or invalid folder index");
             return ESP_FAIL;
         }
-        
         folder_t *folder = &music_index.music_folders[player_state.current_folder_index];
-        
         if (folder->file_count == 0) {
             ESP_LOGW(TAG, "No files in folder");
             return ESP_FAIL;
         }
-        
-        // Go to previous file in folder
-        player_state.current_file_index = (player_state.current_file_index == 0) ?
-                                        (folder->file_count - 1) :
-                                        (player_state.current_file_index - 1);
-        
-        // Get file path
-        json_get_full_path(folder->files[player_state.current_file_index].path, 
-                          full_path, sizeof(full_path));
+        player_state.current_file_index = (player_state.current_file_index == 0) ? (folder->file_count - 1) : (player_state.current_file_index - 1);
+        json_get_full_path(folder->files[player_state.current_file_index].path, full_path, sizeof(full_path));
+    } else if (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE) {
+        if (music_index.folder_count == 0 || player_state.current_folder_index >= music_index.folder_count) {
+            ESP_LOGW(TAG, "No folders or invalid folder index");
+            return ESP_FAIL;
+        }
+        folder_t *folder = &music_index.music_folders[player_state.current_folder_index];
+        if (!shuffle_indices || shuffle_count != folder->file_count) {
+            generate_shuffle_folder();
+        }
+        shuffle_pos = (shuffle_pos == 0) ? (shuffle_count - 1) : (shuffle_pos - 1);
+        player_state.current_file_index = shuffle_indices[shuffle_pos];
+        json_get_full_path(folder->files[player_state.current_file_index].path, full_path, sizeof(full_path));
+    } else {
+        ESP_LOGW(TAG, "Unknown mode");
+        return ESP_FAIL;
     }
-    
-    // Play the file
     return play_file(full_path);
 }
 
@@ -648,23 +704,27 @@ static esp_err_t select_next_folder(void) {
         ESP_LOGW(TAG, "No folders in index");
         return ESP_FAIL;
     }
-    
     // Move to next folder
     player_state.current_folder_index = (player_state.current_folder_index + 1) % music_index.folder_count;
-    
     // Reset file index
     player_state.current_file_index = 0;
-    
-    // Play first file in folder
+    // Regenerate shuffle list if in folder shuffle mode
+    if (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE) {
+        generate_shuffle_folder();
+    }
+    // Play first file in folder (or first in shuffle)
     folder_t *folder = &music_index.music_folders[player_state.current_folder_index];
     if (folder->file_count == 0) {
         ESP_LOGW(TAG, "No files in folder");
         return ESP_FAIL;
     }
-    
     char full_path[256];
-    json_get_full_path(folder->files[0].path, full_path, sizeof(full_path));
-    
+    if (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE && shuffle_indices && shuffle_count > 0) {
+        player_state.current_file_index = shuffle_indices[0];
+        json_get_full_path(folder->files[player_state.current_file_index].path, full_path, sizeof(full_path));
+    } else {
+        json_get_full_path(folder->files[0].path, full_path, sizeof(full_path));
+    }
     return play_file(full_path);
 }
 
@@ -674,24 +734,26 @@ static esp_err_t select_prev_folder(void) {
         ESP_LOGW(TAG, "No folders in index");
         return ESP_FAIL;
     }
-    
     // Move to previous folder
-    player_state.current_folder_index = (player_state.current_folder_index == 0) ?
-                                      (music_index.folder_count - 1) :
-                                      (player_state.current_folder_index - 1);
-    
+    player_state.current_folder_index = (player_state.current_folder_index == 0) ? (music_index.folder_count - 1) : (player_state.current_folder_index - 1);
     // Reset file index
     player_state.current_file_index = 0;
-    
-    // Play first file in folder
+    // Regenerate shuffle list if in folder shuffle mode
+    if (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE) {
+        generate_shuffle_folder();
+    }
+    // Play first file in folder (or first in shuffle)
     folder_t *folder = &music_index.music_folders[player_state.current_folder_index];
     if (folder->file_count == 0) {
         ESP_LOGW(TAG, "No files in folder");
         return ESP_FAIL;
     }
-    
     char full_path[256];
-    json_get_full_path(folder->files[0].path, full_path, sizeof(full_path));
-    
+    if (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE && shuffle_indices && shuffle_count > 0) {
+        player_state.current_file_index = shuffle_indices[0];
+        json_get_full_path(folder->files[player_state.current_file_index].path, full_path, sizeof(full_path));
+    } else {
+        json_get_full_path(folder->files[0].path, full_path, sizeof(full_path));
+    }
     return play_file(full_path);
 }
