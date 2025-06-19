@@ -358,6 +358,9 @@ esp_err_t audio_player_load_state(void) {
     return ESP_ERR_NOT_FOUND;
 }
 
+// Helper: Update current_folder_index to match the folder containing the given file path
+static void update_current_folder_index_for_file(const char *filepath);
+
 // Player task function
 static void player_task(void *arg) {
     ESP_LOGI(TAG, "Player task started");
