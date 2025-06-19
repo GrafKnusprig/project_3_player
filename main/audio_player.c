@@ -510,11 +510,28 @@ static esp_err_t play_file(const char *filepath) {
     // Update the current file path
     strncpy(player_state.current_file_path, filepath, sizeof(player_state.current_file_path) - 1);
     player_state.current_file_path[sizeof(player_state.current_file_path) - 1] = '\0';
-    
+    // Update folder index to match the file
+    update_current_folder_index_for_file(filepath);
     // Save state
     audio_player_save_state();
     
     return ESP_OK;
+}
+
+// Helper: Update current_folder_index to match the folder containing the given file path
+static void update_current_folder_index_for_file(const char *filepath) {
+    for (int i = 0; i < music_index.folder_count; ++i) {
+        folder_t *folder = &music_index.music_folders[i];
+        for (int j = 0; j < folder->file_count; ++j) {
+            char abs_path[256];
+            json_get_full_path(folder->files[j].path, abs_path, sizeof(abs_path));
+            if (strcmp(abs_path, filepath) == 0) {
+                player_state.current_folder_index = i;
+                player_state.current_file_index = j;
+                return;
+            }
+        }
+    }
 }
 
 // Select and play next file based on current mode
