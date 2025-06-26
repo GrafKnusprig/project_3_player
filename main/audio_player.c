@@ -77,9 +77,15 @@ static esp_err_t select_prev_file(void);
 static esp_err_t select_next_folder(void);
 static esp_err_t select_prev_folder(void);
 static void update_current_folder_index_for_file(const char *filepath);
+static esp_err_t configure_i2s(uint32_t sample_rate, uint16_t bit_depth, uint16_t channels);
 
 // Add static handle for I2S TX channel
 static i2s_chan_handle_t i2s_tx_chan = NULL;
+
+// Current I2S configuration
+static uint32_t current_i2s_sample_rate = 0;
+static uint16_t current_i2s_bit_depth = 0;
+static uint16_t current_i2s_channels = 0;
 
 esp_err_t audio_player_init(void) {
     ESP_LOGI(TAG, "Initializing audio player");
@@ -511,22 +517,74 @@ static void player_task(void *arg) {
 static esp_err_t play_file(const char *filepath) {
     ESP_LOGI(TAG, "Playing file: %s", filepath);
     
+    // Find the file entry in the index to get metadata
+    file_entry_t *file_entry = NULL;
+    const char *mount_point = sd_card_get_mount_point();
+    const char *rel_path = filepath;
+    
+    // Strip mount point and /ESP32_MUSIC/ prefix to get relative path
+    if (strncmp(filepath, mount_point, strlen(mount_point)) == 0) {
+        rel_path = filepath + strlen(mount_point);
+        if (*rel_path == '/') rel_path++;
+        if (strncmp(rel_path, "ESP32_MUSIC/", 12) == 0) {
+            rel_path += 12;
+        }
+    }
+    
+    // Find the file in the index
+    for (int i = 0; i < music_index.total_files; i++) {
+        if (strcmp(music_index.all_files[i].path, rel_path) == 0) {
+            file_entry = &music_index.all_files[i];
+            break;
+        }
+    }
+    
+    if (file_entry == NULL) {
+        ESP_LOGE(TAG, "File not found in index: %s", rel_path);
+        return ESP_FAIL;
+    }
+    
+    // Configure I2S for this file's audio parameters
+    esp_err_t ret = configure_i2s(file_entry->sample_rate, file_entry->bit_depth, file_entry->channels);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure I2S for file");
+        return ret;
+    }
+    
     // Close any open file
     if (current_pcm_file.file != NULL) {
         pcm_file_close(&current_pcm_file);
     }
     
-    // Open the new file
-    esp_err_t ret = pcm_file_open(filepath, &current_pcm_file);
+    // Open the new file with metadata
+    ret = pcm_file_open(filepath, &current_pcm_file, file_entry->sample_rate, file_entry->bit_depth, file_entry->channels);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to open PCM file");
         return ret;
     }
     
-    // Update the current file path
+    // Update the player state with current song metadata
     strncpy(player_state.current_file_path, filepath, sizeof(player_state.current_file_path) - 1);
     player_state.current_file_path[sizeof(player_state.current_file_path) - 1] = '\0';
-    // Do NOT update current_folder_index here
+    
+    strncpy(player_state.current_song, file_entry->song, sizeof(player_state.current_song) - 1);
+    player_state.current_song[sizeof(player_state.current_song) - 1] = '\0';
+    
+    strncpy(player_state.current_album, file_entry->album, sizeof(player_state.current_album) - 1);
+    player_state.current_album[sizeof(player_state.current_album) - 1] = '\0';
+    
+    strncpy(player_state.current_artist, file_entry->artist, sizeof(player_state.current_artist) - 1);
+    player_state.current_artist[sizeof(player_state.current_artist) - 1] = '\0';
+    
+    player_state.current_sample_rate = file_entry->sample_rate;
+    player_state.current_bit_depth = file_entry->bit_depth;
+    player_state.current_channels = file_entry->channels;
+    
+    ESP_LOGI(TAG, "Now playing: %s by %s from %s", 
+             player_state.current_song, player_state.current_artist, player_state.current_album);
+    ESP_LOGI(TAG, "Audio format: %lu Hz, %u-bit, %u channels", 
+             player_state.current_sample_rate, player_state.current_bit_depth, player_state.current_channels);
+    
     // Save state
     audio_player_save_state();
     
@@ -536,6 +594,7 @@ static esp_err_t play_file(const char *filepath) {
 // Helper: Update current_folder_index to match the folder containing the given file path
 static void update_current_folder_index_for_file(const char *filepath) {
     ESP_LOGI(TAG, "update_current_folder_index_for_file: looking for %s", filepath);
+    
     // Strip mount point and /ESP32_MUSIC/ prefix to get relative path
     const char *mount_point = sd_card_get_mount_point();
     const char *rel_path = filepath;
@@ -546,19 +605,34 @@ static void update_current_folder_index_for_file(const char *filepath) {
             rel_path += 12;
         }
     }
+    
     ESP_LOGI(TAG, "Relative path for index lookup: %s", rel_path);
-    for (int i = 0; i < music_index.folder_count; ++i) {
-        folder_t *folder = &music_index.music_folders[i];
-        for (int j = 0; j < folder->file_count; ++j) {
-            if (strcmp(folder->files[j].path, rel_path) == 0) {
-                ESP_LOGI(TAG, "Found file in folder %d, file %d: %s", i, j, folder->files[j].path);
-                player_state.current_folder_index = i;
-                player_state.current_file_index = j;
-                return;
+    
+    // Find the file in allFiles and use its folderIndex
+    for (int i = 0; i < music_index.total_files; i++) {
+        if (strcmp(music_index.all_files[i].path, rel_path) == 0) {
+            player_state.current_folder_index = music_index.all_files[i].folder_index;
+            
+            // Now find the file index within that folder
+            if (player_state.current_folder_index < music_index.folder_count) {
+                folder_t *folder = &music_index.music_folders[player_state.current_folder_index];
+                for (int j = 0; j < folder->file_count; j++) {
+                    if (strcmp(folder->files[j].path, rel_path) == 0) {
+                        player_state.current_file_index = j;
+                        ESP_LOGI(TAG, "Found file in folder %d, file %d: %s", 
+                                 player_state.current_folder_index, j, folder->files[j].path);
+                        return;
+                    }
+                }
             }
+            
+            ESP_LOGI(TAG, "Found file in allFiles with folder index %d: %s", 
+                     player_state.current_folder_index, rel_path);
+            return;
         }
     }
-    ESP_LOGW(TAG, "File not found in any folder: %s", rel_path);
+    
+    ESP_LOGW(TAG, "File not found in index: %s", rel_path);
 }
 
 // Helper to free shuffle indices
@@ -771,4 +845,90 @@ static esp_err_t select_prev_folder(void) {
         json_get_full_path(folder->files[0].path, full_path, sizeof(full_path));
     }
     return play_file(full_path);
+}
+
+// Function to configure I2S for specific audio parameters
+static esp_err_t configure_i2s(uint32_t sample_rate, uint16_t bit_depth, uint16_t channels) {
+    // Check if we need to reconfigure
+    if (current_i2s_sample_rate == sample_rate && 
+        current_i2s_bit_depth == bit_depth && 
+        current_i2s_channels == channels) {
+        return ESP_OK; // No change needed
+    }
+    
+    ESP_LOGI(TAG, "Configuring I2S: %lu Hz, %u bits, %u channels", sample_rate, bit_depth, channels);
+    
+    // Disable current channel if exists
+    if (i2s_tx_chan) {
+        i2s_channel_disable(i2s_tx_chan);
+        i2s_del_channel(i2s_tx_chan);
+        i2s_tx_chan = NULL;
+    }
+    
+    // Create new I2S configuration
+    i2s_data_bit_width_t bit_width;
+    switch (bit_depth) {
+        case 8:  bit_width = I2S_DATA_BIT_WIDTH_8BIT; break;
+        case 16: bit_width = I2S_DATA_BIT_WIDTH_16BIT; break;
+        case 24: bit_width = I2S_DATA_BIT_WIDTH_24BIT; break;
+        case 32: bit_width = I2S_DATA_BIT_WIDTH_32BIT; break;
+        default: bit_width = I2S_DATA_BIT_WIDTH_16BIT; break;
+    }
+    
+    i2s_slot_mode_t slot_mode = (channels == 1) ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO;
+    
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = {
+            .sample_rate_hz = sample_rate,
+            .clk_src = I2S_CLK_SRC_DEFAULT,
+            .mclk_multiple = I2S_MCLK_MULTIPLE_256
+        },
+        .slot_cfg = {
+            .data_bit_width = bit_width,
+            .slot_bit_width = bit_width,
+            .slot_mode = slot_mode,
+            .slot_mask = I2S_STD_SLOT_BOTH,
+            .ws_width = I2S_SLOT_BIT_WIDTH_32BIT,
+            .ws_pol = false,
+            .bit_shift = true
+        },
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = I2S_BCK_PIN,
+            .ws = I2S_LRCK_PIN,
+            .dout = I2S_DATA_PIN,
+            .din = I2S_GPIO_UNUSED
+        }
+    };
+    
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
+    esp_err_t ret = i2s_new_channel(&chan_cfg, &i2s_tx_chan, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create I2S TX channel");
+        return ret;
+    }
+    
+    ret = i2s_channel_init_std_mode(i2s_tx_chan, &std_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize I2S standard channel");
+        i2s_del_channel(i2s_tx_chan);
+        i2s_tx_chan = NULL;
+        return ret;
+    }
+    
+    ret = i2s_channel_enable(i2s_tx_chan);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable I2S TX channel");
+        i2s_del_channel(i2s_tx_chan);
+        i2s_tx_chan = NULL;
+        return ret;
+    }
+    
+    // Update current configuration
+    current_i2s_sample_rate = sample_rate;
+    current_i2s_bit_depth = bit_depth;
+    current_i2s_channels = channels;
+    
+    ESP_LOGI(TAG, "I2S configured successfully");
+    return ESP_OK;
 }

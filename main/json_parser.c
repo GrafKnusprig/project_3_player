@@ -2,10 +2,21 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <stdio.h>
 #include <sys/stat.h>
 #include <dirent.h>
+
+#ifndef TEST_MODE
 #include "esp_log.h"
 #include "sd_card.h"
+#else
+// Test mode definitions
+#define ESP_LOGI(tag, format, ...) printf("[INFO] " format "\n", ##__VA_ARGS__)
+#define ESP_LOGE(tag, format, ...) printf("[ERROR] " format "\n", ##__VA_ARGS__)
+#define ESP_LOGW(tag, format, ...) printf("[WARN] " format "\n", ##__VA_ARGS__)
+// Mock SD card function - only define if not already defined
+extern const char* sd_card_get_mount_point();
+#endif
 
 static const char *TAG = "json_parser";
 #define ESP32_MUSIC_DIR "/ESP32_MUSIC"  // Use the original directory name
@@ -182,6 +193,70 @@ static const char* find_array(const char* json, const char* key) {
     return key_pos;
 }
 
+// Helper function to parse a file entry with all metadata
+static void parse_file_entry(const char *file_obj, file_entry_t *file_entry) {
+    // Initialize with defaults
+    memset(file_entry, 0, sizeof(file_entry_t));
+    file_entry->sample_rate = 44100;  // Default
+    file_entry->bit_depth = 16;       // Default
+    file_entry->channels = 2;         // Default
+    file_entry->folder_index = 0;     // Default
+    
+    // Parse name
+    char *name = extract_string(file_obj, "name");
+    if (name) {
+        strncpy(file_entry->name, name, sizeof(file_entry->name) - 1);
+        file_entry->name[sizeof(file_entry->name) - 1] = '\0';
+        free(name);
+    } else {
+        strncpy(file_entry->name, "unknown", sizeof(file_entry->name) - 1);
+    }
+    
+    // Parse path
+    char *path = extract_string(file_obj, "path");
+    if (path) {
+        strncpy(file_entry->path, path, sizeof(file_entry->path) - 1);
+        file_entry->path[sizeof(file_entry->path) - 1] = '\0';
+        free(path);
+    } else {
+        strncpy(file_entry->path, "", sizeof(file_entry->path) - 1);
+    }
+    
+    // Parse audio parameters
+    file_entry->sample_rate = extract_int(file_obj, "sampleRate");
+    file_entry->bit_depth = extract_int(file_obj, "bitDepth");
+    file_entry->channels = extract_int(file_obj, "channels");
+    file_entry->folder_index = extract_int(file_obj, "folderIndex");
+    
+    // Parse song metadata
+    char *song = extract_string(file_obj, "song");
+    if (song) {
+        strncpy(file_entry->song, song, sizeof(file_entry->song) - 1);
+        file_entry->song[sizeof(file_entry->song) - 1] = '\0';
+        free(song);
+    } else {
+        strncpy(file_entry->song, "Unknown Song", sizeof(file_entry->song) - 1);
+    }
+    
+    char *album = extract_string(file_obj, "album");
+    if (album) {
+        strncpy(file_entry->album, album, sizeof(file_entry->album) - 1);
+        file_entry->album[sizeof(file_entry->album) - 1] = '\0';
+        free(album);
+    } else {
+        strncpy(file_entry->album, "Unknown Album", sizeof(file_entry->album) - 1);
+    }
+    
+    char *artist = extract_string(file_obj, "artist");
+    if (artist) {
+        strncpy(file_entry->artist, artist, sizeof(file_entry->artist) - 1);
+        file_entry->artist[sizeof(file_entry->artist) - 1] = '\0';
+        free(artist);
+    } else {
+        strncpy(file_entry->artist, "Unknown Artist", sizeof(file_entry->artist) - 1);
+    }
+}
+
 esp_err_t json_parse_index(const char *filepath, index_file_t *index) {
     if (filepath == NULL || index == NULL) {
         ESP_LOGE(TAG, "Invalid arguments for json_parse_index");
@@ -312,23 +387,7 @@ esp_err_t json_parse_index(const char *filepath, index_file_t *index) {
             // Extract object
             char *obj = extract_object(pos);
             if (obj) {
-                char *name = extract_string(obj, "name");
-                if (name) {
-                    strncpy(index->all_files[i].name, name, sizeof(index->all_files[i].name) - 1);
-                    index->all_files[i].name[sizeof(index->all_files[i].name) - 1] = '\0';
-                    free(name);
-                } else {
-                    strncpy(index->all_files[i].name, "unknown", sizeof(index->all_files[i].name) - 1);
-                }
-                
-                char *path = extract_string(obj, "path");
-                if (path) {
-                    strncpy(index->all_files[i].path, path, sizeof(index->all_files[i].path) - 1);
-                    index->all_files[i].path[sizeof(index->all_files[i].path) - 1] = '\0';
-                    free(path);
-                } else {
-                    strncpy(index->all_files[i].path, "", sizeof(index->all_files[i].path) - 1);
-                }
+                parse_file_entry(obj, &index->all_files[i]);
                 
                 free(obj);
                 
@@ -363,22 +422,31 @@ esp_err_t json_parse_index(const char *filepath, index_file_t *index) {
         // Parse each folder entry
         const char *pos = folders_array + 1;  // Skip opening bracket
         for (int i = 0; i < folders_count; i++) {
+            ESP_LOGI(TAG, "Parsing folder %d", i);
+            
             // Find next object
             while (*pos && (*pos != '{')) {
                 pos++;
             }
             
-            if (!*pos) break;  // End of string
+            if (!*pos) {
+                ESP_LOGW(TAG, "No opening brace found for folder %d", i);
+                break;  // End of string
+            }
             
             // Extract object
             char *folder_obj = extract_object(pos);
             if (folder_obj) {
+                ESP_LOGI(TAG, "Folder object %d: %.100s...", i, folder_obj);
+                
                 char *name = extract_string(folder_obj, "name");
                 if (name) {
+                    ESP_LOGI(TAG, "Found folder name: %s", name);
                     strncpy(index->music_folders[i].name, name, sizeof(index->music_folders[i].name) - 1);
                     index->music_folders[i].name[sizeof(index->music_folders[i].name) - 1] = '\0';
                     free(name);
                 } else {
+                    ESP_LOGW(TAG, "No name found for folder %d", i);
                     strncpy(index->music_folders[i].name, "unknown", sizeof(index->music_folders[i].name) - 1);
                 }
                 
@@ -418,23 +486,7 @@ esp_err_t json_parse_index(const char *filepath, index_file_t *index) {
                         // Extract object
                         char *file_obj = extract_object(file_pos);
                         if (file_obj) {
-                            char *file_name = extract_string(file_obj, "name");
-                            if (file_name) {
-                                strncpy(index->music_folders[i].files[j].name, file_name, sizeof(index->music_folders[i].files[j].name) - 1);
-                                index->music_folders[i].files[j].name[sizeof(index->music_folders[i].files[j].name) - 1] = '\0';
-                                free(file_name);
-                            } else {
-                                strncpy(index->music_folders[i].files[j].name, "unknown", sizeof(index->music_folders[i].files[j].name) - 1);
-                            }
-                            
-                            char *file_path = extract_string(file_obj, "path");
-                            if (file_path) {
-                                strncpy(index->music_folders[i].files[j].path, file_path, sizeof(index->music_folders[i].files[j].path) - 1);
-                                index->music_folders[i].files[j].path[sizeof(index->music_folders[i].files[j].path) - 1] = '\0';
-                                free(file_path);
-                            } else {
-                                strncpy(index->music_folders[i].files[j].path, "", sizeof(index->music_folders[i].files[j].path) - 1);
-                            }
+                            parse_file_entry(file_obj, &index->music_folders[i].files[j]);
                             
                             free(file_obj);
                             
@@ -453,12 +505,29 @@ esp_err_t json_parse_index(const char *filepath, index_file_t *index) {
                 
                 free(folder_obj);
                 
-                // Move to end of object
-                while (*pos && (*pos != '}')) {
+                // Move to end of the extracted object
+                int brace_count = 1;
+                pos++; // Move past the opening brace we found
+                while (*pos && brace_count > 0) {
+                    if (*pos == '{') {
+                        brace_count++;
+                    } else if (*pos == '}') {
+                        brace_count--;
+                    }
                     pos++;
                 }
-                
-                if (*pos) pos++;  // Skip closing brace
+            } else {
+                // If extract_object failed, try to skip this malformed object
+                int brace_count = 1;
+                pos++;
+                while (*pos && brace_count > 0) {
+                    if (*pos == '{') {
+                        brace_count++;
+                    } else if (*pos == '}') {
+                        brace_count--;
+                    }
+                    pos++;
+                }
             }
         }
     } else {

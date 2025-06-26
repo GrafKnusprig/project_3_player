@@ -2,12 +2,19 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+
+#ifndef TEST_MODE
 #include "esp_log.h"
 #include "sd_card.h" // Add for path resolution
+#else
+// Test mode definitions
+#define ESP_LOGI(tag, format, ...) printf("[INFO] " format "\n", ##__VA_ARGS__)
+#define ESP_LOGE(tag, format, ...) printf("[ERROR] " format "\n", ##__VA_ARGS__)
+#endif
 
 static const char *TAG = "pcm_file";
 
-esp_err_t pcm_file_open(const char *filepath, pcm_file_t *pcm_file) {
+esp_err_t pcm_file_open(const char *filepath, pcm_file_t *pcm_file, uint32_t sample_rate, uint16_t bit_depth, uint16_t channels) {
     if (filepath == NULL || pcm_file == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -23,31 +30,26 @@ esp_err_t pcm_file_open(const char *filepath, pcm_file_t *pcm_file) {
         return ESP_FAIL;
     }
 
-    // Read the header
-    size_t read_size = fread(&pcm_file->header, 1, sizeof(pcm_header_t), pcm_file->file);
-    if (read_size != sizeof(pcm_header_t)) {
-        ESP_LOGE(TAG, "Failed to read PCM header");
-        fclose(pcm_file->file);
-        return ESP_FAIL;
-    }
-
-    // Verify the magic number
-    if (strncmp(pcm_file->header.magic, PCM_MAGIC, strlen(PCM_MAGIC)) != 0) {
-        ESP_LOGE(TAG, "Invalid PCM file format, wrong magic number");
-        fclose(pcm_file->file);
-        return ESP_FAIL;
-    }
-
-    // Store the filepath
+    // Store the filepath and audio parameters
     strncpy(pcm_file->filepath, filepath, sizeof(pcm_file->filepath) - 1);
     pcm_file->filepath[sizeof(pcm_file->filepath) - 1] = '\0';
+    
+    // Set audio parameters from metadata
+    pcm_file->sample_rate = sample_rate;
+    pcm_file->bit_depth = bit_depth;
+    pcm_file->channels = channels;
+    
+    // Get file size
+    fseek(pcm_file->file, 0, SEEK_END);
+    pcm_file->file_size = ftell(pcm_file->file);
+    fseek(pcm_file->file, 0, SEEK_SET);
     
     // Initialize position
     pcm_file->position = 0;
     
     ESP_LOGI(TAG, "PCM file opened: %s", filepath);
-    ESP_LOGI(TAG, "Sample rate: %lu Hz, Bit depth: %u bits, Channels: %u", 
-             pcm_file->header.sample_rate, pcm_file->header.bit_depth, pcm_file->header.channels);
+    ESP_LOGI(TAG, "Sample rate: %lu Hz, Bit depth: %u bits, Channels: %u, Size: %zu bytes", 
+             pcm_file->sample_rate, pcm_file->bit_depth, pcm_file->channels, pcm_file->file_size);
     
     return ESP_OK;
 }
@@ -57,17 +59,14 @@ esp_err_t pcm_file_seek(pcm_file_t *pcm_file, uint32_t byte_pos) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    long header_size = (long)sizeof(pcm_header_t);
-    long seek_pos = header_size + (long)byte_pos;
-
-    if (fseek(pcm_file->file, seek_pos, SEEK_SET) != 0) {
+    if (fseek(pcm_file->file, byte_pos, SEEK_SET) != 0) {
         ESP_LOGE(TAG, "Failed to seek to byte position %u in PCM file (errno: %d)", byte_pos, errno);
         return ESP_FAIL;
     }
 
     pcm_file->position = byte_pos;
 
-    ESP_LOGI(TAG, "PCM file seek: byte_pos=%u, new position=%ld", byte_pos, pcm_file->position);
+    ESP_LOGI(TAG, "PCM file seek: byte_pos=%u, new position=%u", byte_pos, pcm_file->position);
 
     return ESP_OK;
 }
@@ -108,6 +107,14 @@ esp_err_t pcm_file_read(pcm_file_t *pcm_file, void *buffer, size_t buffer_size, 
     return ESP_OK;
 }
 
-pcm_header_t pcm_file_get_header(pcm_file_t *pcm_file) {
-    return pcm_file->header;
+esp_err_t pcm_file_get_params(pcm_file_t *pcm_file, uint32_t *sample_rate, uint16_t *bit_depth, uint16_t *channels) {
+    if (pcm_file == NULL || sample_rate == NULL || bit_depth == NULL || channels == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    *sample_rate = pcm_file->sample_rate;
+    *bit_depth = pcm_file->bit_depth;
+    *channels = pcm_file->channels;
+    
+    return ESP_OK;
 }

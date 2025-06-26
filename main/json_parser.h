@@ -2,12 +2,30 @@
 #define JSON_PARSER_H
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+
+#ifndef TEST_MODE
 #include "esp_err.h"
+#else
+typedef int esp_err_t;
+#define ESP_OK 0
+#define ESP_FAIL -1
+#define ESP_ERR_INVALID_ARG -2
+#define ESP_ERR_NO_MEM -3
+#endif
 
 // File entry structure
 typedef struct {
     char name[256];
     char path[256];
+    uint32_t sample_rate;
+    uint16_t bit_depth;
+    uint16_t channels;
+    int folder_index;
+    char song[256];
+    char album[256];
+    char artist[256];
 } file_entry_t;
 
 // Folder structure

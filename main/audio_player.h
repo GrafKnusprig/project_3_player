@@ -21,6 +21,13 @@ typedef struct {
     int current_folder_index;
     bool is_playing;
     char current_file_path[256];
+    // Current song metadata
+    char current_song[256];
+    char current_album[256];
+    char current_artist[256];
+    uint32_t current_sample_rate;
+    uint16_t current_bit_depth;
+    uint16_t current_channels;
 } player_state_t;
 
 /**

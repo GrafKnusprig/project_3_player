@@ -80,7 +80,13 @@ void app_main(void)
     ESP_LOGI(TAG, "Project 3 player starting");
 
     esp_err_t err = esp_wifi_stop();
-    esp_wifi_deinit();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi stop failed: %s", esp_err_to_name(err));
+    }
+    err = esp_wifi_deinit();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi deinit failed: %s", esp_err_to_name(err));
+    }
 
     // Initialize NVS flash
     esp_err_t ret = nvs_flash_init();
