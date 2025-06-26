@@ -115,6 +115,13 @@ bool ezButton_isLongPressed(ezButton_t* button) {
     return false;
 }
 
+bool ezButton_wasLongPressed(ezButton_t* button) {
+    if (!button) return false;
+    bool wasLong = button->isLongDetected;
+    button->isLongDetected = false;
+    return wasLong;
+}
+
 void ezButton_setCountMode(ezButton_t* button, int mode) {
     if (button) {
         button->countMode = mode;

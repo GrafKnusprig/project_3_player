@@ -111,6 +111,14 @@ bool ezButton_isReleased(ezButton_t* button);
 bool ezButton_isLongPressed(ezButton_t* button);
 
 /**
+ * Check if the button was long pressed since the last call (latches and clears the flag)
+ *
+ * @param button Pointer to the button instance
+ * @return true if a long press event occurred since last call
+ */
+bool ezButton_wasLongPressed(ezButton_t* button);
+
+/**
  * Set the counting mode for button presses
  * 
  * @param button Pointer to the button instance

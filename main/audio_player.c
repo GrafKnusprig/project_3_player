@@ -76,6 +76,7 @@ static esp_err_t select_next_file(void);
 static esp_err_t select_prev_file(void);
 static esp_err_t select_next_folder(void);
 static esp_err_t select_prev_folder(void);
+static void update_current_folder_index_for_file(const char *filepath);
 
 // Add static handle for I2S TX channel
 static i2s_chan_handle_t i2s_tx_chan = NULL;
@@ -306,6 +307,10 @@ esp_err_t audio_player_set_mode(playback_mode_t mode) {
     if (mode >= MODE_MAX) {
         return ESP_ERR_INVALID_ARG;
     }
+    // If switching to a folder mode, update current_folder_index to match the current file
+    if ((mode == MODE_PLAY_FOLDER_ORDER || mode == MODE_PLAY_FOLDER_SHUFFLE) && strlen(player_state.current_file_path) > 0) {
+        update_current_folder_index_for_file(player_state.current_file_path);
+    }
     player_state.mode = mode;
     // Update shuffle list if entering a shuffle mode
     update_shuffle_list();
@@ -521,8 +526,7 @@ static esp_err_t play_file(const char *filepath) {
     // Update the current file path
     strncpy(player_state.current_file_path, filepath, sizeof(player_state.current_file_path) - 1);
     player_state.current_file_path[sizeof(player_state.current_file_path) - 1] = '\0';
-    // Update folder index to match the file
-    update_current_folder_index_for_file(filepath);
+    // Do NOT update current_folder_index here
     // Save state
     audio_player_save_state();
     
@@ -531,18 +535,30 @@ static esp_err_t play_file(const char *filepath) {
 
 // Helper: Update current_folder_index to match the folder containing the given file path
 static void update_current_folder_index_for_file(const char *filepath) {
+    ESP_LOGI(TAG, "update_current_folder_index_for_file: looking for %s", filepath);
+    // Strip mount point and /ESP32_MUSIC/ prefix to get relative path
+    const char *mount_point = sd_card_get_mount_point();
+    const char *rel_path = filepath;
+    if (strncmp(filepath, mount_point, strlen(mount_point)) == 0) {
+        rel_path = filepath + strlen(mount_point);
+        if (*rel_path == '/') rel_path++;
+        if (strncmp(rel_path, "ESP32_MUSIC/", 12) == 0) {
+            rel_path += 12;
+        }
+    }
+    ESP_LOGI(TAG, "Relative path for index lookup: %s", rel_path);
     for (int i = 0; i < music_index.folder_count; ++i) {
         folder_t *folder = &music_index.music_folders[i];
         for (int j = 0; j < folder->file_count; ++j) {
-            char abs_path[256];
-            json_get_full_path(folder->files[j].path, abs_path, sizeof(abs_path));
-            if (strcmp(abs_path, filepath) == 0) {
+            if (strcmp(folder->files[j].path, rel_path) == 0) {
+                ESP_LOGI(TAG, "Found file in folder %d, file %d: %s", i, j, folder->files[j].path);
                 player_state.current_folder_index = i;
                 player_state.current_file_index = j;
                 return;
             }
         }
     }
+    ESP_LOGW(TAG, "File not found in any folder: %s", rel_path);
 }
 
 // Helper to free shuffle indices
@@ -607,7 +623,6 @@ static esp_err_t select_next_file(void) {
         return ESP_FAIL;
     }
     char full_path[256];
-    bool random_mode = (player_state.mode == MODE_PLAY_ALL_SHUFFLE) || (player_state.mode == MODE_PLAY_FOLDER_SHUFFLE);
     if (player_state.mode == MODE_PLAY_ALL_ORDER) {
         // All files in order
         player_state.current_file_index = (player_state.current_file_index + 1) % music_index.total_files;

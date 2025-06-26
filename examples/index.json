@@ -1,0 +1,81 @@
+{
+  "version": "1.1",
+  "totalFiles": 3,
+  "allFiles": [
+    {
+      "name": "song1.pcm",
+      "path": "Pop/song1.pcm",
+      "sampleRate": 44100,
+      "bitDepth": 16,
+      "channels": 2,
+      "folderIndex": 0,
+      "song": "Song One",
+      "album": "Pop Hits",
+      "artist": "Artist A"
+    },
+    {
+      "name": "song2.pcm",
+      "path": "Pop/song2.pcm",
+      "sampleRate": 44100,
+      "bitDepth": 16,
+      "channels": 2,
+      "folderIndex": 0,
+      "song": "Song Two",
+      "album": "Pop Hits",
+      "artist": "Artist B"
+    },
+    {
+      "name": "song3.pcm",
+      "path": "Rock/song3.pcm",
+      "sampleRate": 44100,
+      "bitDepth": 16,
+      "channels": 2,
+      "folderIndex": 1,
+      "song": "Rock Anthem",
+      "album": "Rock Collection",
+      "artist": "Artist C"
+    }
+  ],
+  "musicFolders": [
+    {
+      "name": "Pop",
+      "files": [
+        {
+          "name": "song1.pcm",
+          "path": "Pop/song1.pcm",
+          "sampleRate": 44100,
+          "bitDepth": 16,
+          "channels": 2,
+          "song": "Song One",
+          "album": "Pop Hits",
+          "artist": "Artist A"
+        },
+        {
+          "name": "song2.pcm",
+          "path": "Pop/song2.pcm",
+          "sampleRate": 44100,
+          "bitDepth": 16,
+          "channels": 2,
+          "song": "Song Two",
+          "album": "Pop Hits",
+          "artist": "Artist B"
+        }
+      ]
+    },
+    {
+      "name": "Rock",
+      "files": [
+        {
+          "name": "song3.pcm",
+          "path": "Rock/song3.pcm",
+          "sampleRate": 44100,
+          "bitDepth": 16,
+          "channels": 2,
+          "song": "Rock Anthem",
+          "album": "Rock Collection",
+          "artist": "Artist C"
+        }
+      ]
+    }
+  ]
+}
