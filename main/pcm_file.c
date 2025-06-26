@@ -48,7 +48,7 @@ esp_err_t pcm_file_open(const char *filepath, pcm_file_t *pcm_file, uint32_t sam
     pcm_file->position = 0;
     
     ESP_LOGI(TAG, "PCM file opened: %s", filepath);
-    ESP_LOGI(TAG, "Sample rate: %lu Hz, Bit depth: %u bits, Channels: %u, Size: %zu bytes", 
+    ESP_LOGI(TAG, "Sample rate: %u Hz, Bit depth: %u bits, Channels: %u, Size: %zu bytes", 
              pcm_file->sample_rate, pcm_file->bit_depth, pcm_file->channels, pcm_file->file_size);
     
     return ESP_OK;

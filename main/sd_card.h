@@ -2,7 +2,18 @@
 #define SD_CARD_H
 
 #include <stdbool.h>
+
+#ifdef TEST_MODE
+typedef int esp_err_t;
+#define ESP_OK 0
+#define ESP_FAIL -1
+#define ESP_ERR_INVALID_ARG -2
+#define ESP_ERR_NO_MEM -3
+#define ESP_ERR_INVALID_STATE -4
+#define ESP_ERR_NOT_FOUND -5
+#else
 #include "esp_err.h"
+#endif
 
 /**
  * @brief Initialize the SD card

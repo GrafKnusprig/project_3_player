@@ -1,0 +1,106 @@
+{
+  "version": "1.1",
+  "totalFiles": 4,
+  "allFiles": [
+    {
+      "name": "song1.pcm",
+      "path": "Pop/song1.pcm",
+      "song": "Pop Song One",
+      "album": "Pop Hits",
+      "artist": "Pop Artist A",
+      "sampleRate": 44100,
+      "bitDepth": 16,
+      "channels": 2,
+      "folderIndex": 0
+    },
+    {
+      "name": "song2.pcm", 
+      "path": "Pop/song2.pcm",
+      "song": "Pop Song Two",
+      "album": "Pop Hits",
+      "artist": "Pop Artist B",
+      "sampleRate": 48000,
+      "bitDepth": 24,
+      "channels": 2,
+      "folderIndex": 0
+    },
+    {
+      "name": "song3.pcm",
+      "path": "Rock/song3.pcm", 
+      "song": "Rock Anthem",
+      "album": "Rock Collection",
+      "artist": "Rock Artist C",
+      "sampleRate": 44100,
+      "bitDepth": 16,
+      "channels": 2,
+      "folderIndex": 1
+    },
+    {
+      "name": "song4.pcm",
+      "path": "Rock/song4.pcm",
+      "song": "Heavy Metal", 
+      "album": "Rock Collection",
+      "artist": "Rock Artist D",
+      "sampleRate": 96000,
+      "bitDepth": 32,
+      "channels": 2,
+      "folderIndex": 1
+    }
+  ],
+  "folders": [
+    {
+      "name": "Pop",
+      "files": [
+        {
+          "name": "song1.pcm",
+          "path": "Pop/song1.pcm",
+          "song": "Pop Song One",
+          "album": "Pop Hits", 
+          "artist": "Pop Artist A",
+          "sampleRate": 44100,
+          "bitDepth": 16,
+          "channels": 2,
+          "folderIndex": 0
+        },
+        {
+          "name": "song2.pcm",
+          "path": "Pop/song2.pcm", 
+          "song": "Pop Song Two",
+          "album": "Pop Hits",
+          "artist": "Pop Artist B",
+          "sampleRate": 48000,
+          "bitDepth": 24,
+          "channels": 2,
+          "folderIndex": 0
+        }
+      ]
+    },
+    {
+      "name": "Rock", 
+      "files": [
+        {
+          "name": "song3.pcm",
+          "path": "Rock/song3.pcm",
+          "song": "Rock Anthem", 
+          "album": "Rock Collection",
+          "artist": "Rock Artist C",
+          "sampleRate": 44100,
+          "bitDepth": 16,
+          "channels": 2,
+          "folderIndex": 1
+        },
+        {
+          "name": "song4.pcm",
+          "path": "Rock/song4.pcm",
+          "song": "Heavy Metal",
+          "album": "Rock Collection", 
+          "artist": "Rock Artist D",
+          "sampleRate": 96000,
+          "bitDepth": 32,
+          "channels": 2,
+          "folderIndex": 1
+        }
+      ]
+    }
+  ]
+}

@@ -5,15 +5,105 @@
 #include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
+
+#ifndef TEST_MODE
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/i2s_std.h"
 #include "esp_log.h"
+#else
+#define ESP_LOGI(tag, format, ...) printf("[INFO] " format "\n", ##__VA_ARGS__)
+#define ESP_LOGE(tag, format, ...) printf("[ERROR] " format "\n", ##__VA_ARGS__)
+#define ESP_LOGW(tag, format, ...) printf("[WARN] " format "\n", ##__VA_ARGS__)
+
+// Mock FreeRTOS types and definitions for test mode
+typedef void* TaskHandle_t;
+typedef void* QueueHandle_t;
+typedef int BaseType_t;
+typedef void* i2s_chan_handle_t;
+typedef struct { int dummy; } i2s_chan_config_t;
+typedef struct { 
+    struct {
+        int sample_rate_hz;
+        int clk_src;
+        int mclk_multiple;
+    } clk_cfg;
+    struct {
+        int data_bit_width;
+        int slot_bit_width; 
+        int slot_mode;
+        int slot_mask;
+        int ws_width;
+        bool ws_pol;
+        bool bit_shift;
+    } slot_cfg;
+    struct { 
+        int bclk; 
+        int ws; 
+        int dout; 
+        int din; 
+        int mclk; 
+    } gpio_cfg;
+} i2s_std_config_t;
+typedef int i2s_data_bit_width_t;
+typedef int i2s_slot_mode_t;
+
+#define pdPASS 1
+#define pdTRUE 1
+#define pdMS_TO_TICKS(ms) (ms)
+#define portMAX_DELAY 0xFFFFFFFF
+#define tskIDLE_PRIORITY 0
+#define I2S_CHANNEL_DEFAULT_CONFIG(port, role) {0}
+#define I2S_PORT 0
+#define I2S_ROLE_MASTER 0
+#define I2S_NUM_0 0
+#define I2S_CLK_SRC_DEFAULT 0
+#define I2S_MCLK_MULTIPLE_256 0
+#define I2S_DATA_BIT_WIDTH_8BIT 0
+#define I2S_DATA_BIT_WIDTH_16BIT 1
+#define I2S_DATA_BIT_WIDTH_24BIT 2
+#define I2S_DATA_BIT_WIDTH_32BIT 3
+#define I2S_SLOT_BIT_WIDTH_16BIT 1
+#define I2S_SLOT_BIT_WIDTH_32BIT 3
+#define I2S_SLOT_MODE_MONO 1
+#define I2S_SLOT_MODE_STEREO 0
+#define I2S_STD_SLOT_BOTH 0
+#define I2S_GPIO_UNUSED -1
+
+// Mock FreeRTOS functions
+QueueHandle_t xQueueCreate(int items, int size) { return (void*)1; }
+void vQueueDelete(QueueHandle_t queue) {}
+int xQueueSend(QueueHandle_t queue, const void* item, int timeout) { return pdPASS; }
+int xQueueReceive(QueueHandle_t queue, void* item, int timeout) { return pdTRUE; }
+BaseType_t xTaskCreate(void* func, const char* name, int stack, void* param, int priority, TaskHandle_t* handle) { 
+    *handle = (void*)1; 
+    return pdPASS; 
+}
+void vTaskDelay(int ticks) {}
+void vTaskDelete(TaskHandle_t task) {}
+
+// Mock I2S functions
+esp_err_t i2s_new_channel(i2s_chan_config_t* config, i2s_chan_handle_t* tx, i2s_chan_handle_t* rx) { return ESP_OK; }
+esp_err_t i2s_channel_init_std_mode(i2s_chan_handle_t handle, i2s_std_config_t* config) { return ESP_OK; }
+esp_err_t i2s_channel_enable(i2s_chan_handle_t handle) { return ESP_OK; }
+esp_err_t i2s_channel_disable(i2s_chan_handle_t handle) { return ESP_OK; }
+esp_err_t i2s_del_channel(i2s_chan_handle_t handle) { return ESP_OK; }
+esp_err_t i2s_channel_write(i2s_chan_handle_t handle, const void* src, size_t size, size_t* bytes_written, int timeout) {
+    *bytes_written = size;
+    return ESP_OK;
+}
+
+// Mock neopixel function
+esp_err_t neopixel_indicate_mode(int mode) { return ESP_OK; }
+#endif
+
 #include "sd_card.h"
 #include "pcm_file.h"
 #include "json_parser.h"
+#ifndef TEST_MODE
 #include "neopixel.h"
+#endif
 
 static const char *TAG = "audio_player";
 
@@ -476,7 +566,7 @@ static void player_task(void *arg) {
                     
                     // Check if all bytes were written
                     if (bytes_written != bytes_read) {
-                        ESP_LOGW(TAG, "Not all bytes written to I2S: %d of %d", 
+                        ESP_LOGW(TAG, "Not all bytes written to I2S: %zu of %zu", 
                                   bytes_written, bytes_read);
                     }
                 } else {
@@ -582,7 +672,7 @@ static esp_err_t play_file(const char *filepath) {
     
     ESP_LOGI(TAG, "Now playing: %s by %s from %s", 
              player_state.current_song, player_state.current_artist, player_state.current_album);
-    ESP_LOGI(TAG, "Audio format: %lu Hz, %u-bit, %u channels", 
+    ESP_LOGI(TAG, "Audio format: %u Hz, %u-bit, %u channels", 
              player_state.current_sample_rate, player_state.current_bit_depth, player_state.current_channels);
     
     // Save state
@@ -856,7 +946,7 @@ static esp_err_t configure_i2s(uint32_t sample_rate, uint16_t bit_depth, uint16_
         return ESP_OK; // No change needed
     }
     
-    ESP_LOGI(TAG, "Configuring I2S: %lu Hz, %u bits, %u channels", sample_rate, bit_depth, channels);
+    ESP_LOGI(TAG, "Configuring I2S: %u Hz, %u bits, %u channels", sample_rate, bit_depth, channels);
     
     // Disable current channel if exists
     if (i2s_tx_chan) {
@@ -932,3 +1022,26 @@ static esp_err_t configure_i2s(uint32_t sample_rate, uint16_t bit_depth, uint16_
     ESP_LOGI(TAG, "I2S configured successfully");
     return ESP_OK;
 }
+
+#ifdef TEST_MODE
+// Test helper function to manually trigger file selection
+esp_err_t test_select_next_file(void) {
+    return select_next_file();
+}
+
+esp_err_t test_select_prev_file(void) {
+    return select_prev_file();
+}
+
+esp_err_t test_play_current_file(void) {
+    // Get current file path
+    char filepath[256];
+    esp_err_t ret = json_get_full_path(music_index.all_files[player_state.current_file_index].path, 
+                                       filepath, sizeof(filepath));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    
+    return play_file(filepath);
+}
+#endif
