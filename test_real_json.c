@@ -31,8 +31,12 @@ int main() {
         printf("  Sample Rate: %u Hz\n", index.all_files[0].sample_rate);
         
         printf("\nFirst folder details:\n");
-        printf("  Name: %s\n", index.music_folders[0].name);
-        printf("  File count: %d\n", index.music_folders[0].file_count);
+        if (index.folder_count > 0 && index.music_folders) {
+            printf("  Name: %s\n", index.music_folders[0].name);
+            printf("  File count: %d\n", index.music_folders[0].file_count);
+        } else {
+            printf("  No folders found or parsed\n");
+        }
         
         // Test path generation
         char full_path[256];

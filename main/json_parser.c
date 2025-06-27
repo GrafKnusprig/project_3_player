@@ -1,8 +1,8 @@
 #include "json_parser.h"
 #include <string.h>
 #include <stdlib.h>
-#include <errno.h>
 #include <stdio.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <dirent.h>
 
@@ -10,251 +10,240 @@
 #include "esp_log.h"
 #include "sd_card.h"
 #else
-// Test mode definitions
 #define ESP_LOGI(tag, format, ...) printf("[INFO] " format "\n", ##__VA_ARGS__)
 #define ESP_LOGE(tag, format, ...) printf("[ERROR] " format "\n", ##__VA_ARGS__)
 #define ESP_LOGW(tag, format, ...) printf("[WARN] " format "\n", ##__VA_ARGS__)
-// Mock SD card function - only define if not already defined
-extern const char* sd_card_get_mount_point();
+extern const char* sd_card_get_mount_point(void); // Defined in test file
 #endif
 
 static const char *TAG = "json_parser";
-#define ESP32_MUSIC_DIR "/ESP32_MUSIC"  // Use the original directory name
+#define ESP32_MUSIC_DIR "/ESP32_MUSIC"
+#define BUFFER_SIZE 512  // Small buffer for streaming
 
-// Simple JSON parser for index.json
-// This is a simple parser that doesn't handle all JSON cases but works for our specific format
-
-// Helper function to extract string value between quotes
-static char* extract_string(const char* json, const char* key) {
-    char search_key[256];
-    sprintf(search_key, "\"%s\":", key);
+/**
+ * Helper function to read a small chunk from file at position
+ */
+static esp_err_t read_chunk_at_position(FILE *file, long position, char *buffer, size_t buffer_size) {
+    if (fseek(file, position, SEEK_SET) != 0) {
+        return ESP_FAIL;
+    }
     
-    char* key_pos = strstr(json, search_key);
+    size_t read_bytes = fread(buffer, 1, buffer_size - 1, file);
+    buffer[read_bytes] = '\0';
+    
+    return ESP_OK;
+}
+
+/**
+ * Find the next occurrence of a pattern in the file starting from position
+ */
+static long find_pattern_in_file(FILE *file, long start_pos, const char *pattern, long max_search) {
+    size_t pattern_len = strlen(pattern);
+    if (pattern_len == 0) return -1;
+    
+    char *search_buffer = malloc(BUFFER_SIZE + pattern_len);
+    if (!search_buffer) return -1;
+    
+    long current_pos = start_pos;
+    long searched = 0;
+    size_t buffer_overlap = 0;
+    
+    while (searched < max_search) {
+        // Seek to current position
+        if (fseek(file, current_pos, SEEK_SET) != 0) {
+            free(search_buffer);
+            return -1;
+        }
+        
+        // Read new data after any overlap from previous buffer
+        size_t bytes_to_read = BUFFER_SIZE;
+        size_t bytes_read = fread(search_buffer + buffer_overlap, 1, bytes_to_read, file);
+        
+        if (bytes_read == 0) {
+            // End of file
+            break;
+        }
+        
+        // Null terminate for string operations
+        size_t total_bytes = buffer_overlap + bytes_read;
+        search_buffer[total_bytes] = '\0';
+        
+        // Search for pattern in current buffer
+        char *found = strstr(search_buffer, pattern);
+        if (found) {
+            long found_pos = current_pos - buffer_overlap + (found - search_buffer);
+            free(search_buffer);
+            return found_pos;
+        }
+        
+        // If we read less than requested, we're at end of file
+        if (bytes_read < bytes_to_read) {
+            break;
+        }
+        
+        // Prepare overlap for next iteration
+        // Copy last (pattern_len - 1) bytes to beginning of buffer
+        if (total_bytes >= pattern_len) {
+            memmove(search_buffer, search_buffer + total_bytes - (pattern_len - 1), pattern_len - 1);
+            buffer_overlap = pattern_len - 1;
+        } else {
+            buffer_overlap = total_bytes;
+        }
+        
+        // Move forward by the amount we actually processed
+        current_pos += bytes_read;
+        searched += bytes_read;
+    }
+    
+    free(search_buffer);
+    return -1; // Not found
+}
+
+/**
+ * Extract a JSON string value from a small buffer
+ */
+static esp_err_t extract_string_from_buffer(const char *buffer, const char *key, char *result, size_t max_len) {
+    char search_pattern[64];
+    snprintf(search_pattern, sizeof(search_pattern), "\"%s\":", key);
+    
+    char *key_pos = strstr(buffer, search_pattern);
     if (!key_pos) {
-        return NULL;
+        return ESP_FAIL;
     }
     
-    // Move pointer to after key
-    key_pos += strlen(search_key);
+    // Move to value
+    key_pos += strlen(search_pattern);
+    while (*key_pos == ' ' || *key_pos == '\t' || *key_pos == '\n') key_pos++;
     
-    // Skip whitespace
-    while (*key_pos == ' ' || *key_pos == '\t' || *key_pos == '\n' || *key_pos == '\r') {
-        key_pos++;
-    }
-    
-    // Check if we have a string (starts with ")
     if (*key_pos != '"') {
-        return NULL;
+        return ESP_FAIL;
     }
-    
-    // Move past opening quote
-    key_pos++;
+    key_pos++; // Skip opening quote
     
     // Find closing quote
-    char* end_pos = strchr(key_pos, '"');
-    if (!end_pos) {
-        return NULL;
+    char *end_quote = strchr(key_pos, '"');
+    if (!end_quote) {
+        return ESP_FAIL;
     }
     
-    // Calculate length
-    size_t len = end_pos - key_pos;
-    
-    // Allocate and copy string
-    char* result = malloc(len + 1);
-    if (!result) {
-        return NULL;
+    size_t len = end_quote - key_pos;
+    if (len >= max_len) {
+        len = max_len - 1;
     }
     
     strncpy(result, key_pos, len);
     result[len] = '\0';
     
-    return result;
+    return ESP_OK;
 }
 
-// Helper function to extract integer value
-static int extract_int(const char* json, const char* key) {
-    char search_key[256];
-    sprintf(search_key, "\"%s\":", key);
+/**
+ * Extract a JSON integer value from a small buffer
+ */
+static int extract_int_from_buffer(const char *buffer, const char *key) {
+    char search_pattern[64];
+    snprintf(search_pattern, sizeof(search_pattern), "\"%s\":", key);
     
-    char* key_pos = strstr(json, search_key);
+    char *key_pos = strstr(buffer, search_pattern);
     if (!key_pos) {
         return 0;
     }
     
-    // Move pointer to after key
-    key_pos += strlen(search_key);
+    // Move to value
+    key_pos += strlen(search_pattern);
+    while (*key_pos == ' ' || *key_pos == '\t' || *key_pos == '\n') key_pos++;
     
-    // Skip whitespace
-    while (*key_pos == ' ' || *key_pos == '\t' || *key_pos == '\n' || *key_pos == '\r') {
-        key_pos++;
-    }
-    
-    // Convert to integer
     return atoi(key_pos);
 }
 
-// Helper function to find array size
-static int get_array_size(const char* array_start) {
-    int count = 0;
-    int brace_level = 0;
-    bool in_object = false;
+/**
+ * Find the position of the nth JSON object in an array
+ */
+static long find_nth_object_in_array(FILE *file, long array_start, int n) {
+    long current_pos = array_start;
+    int found_count = 0;
     
-    // Skip the opening bracket
-    array_start++;
+    // Skip to after opening bracket
+    char buffer[BUFFER_SIZE];
+    if (read_chunk_at_position(file, current_pos, buffer, BUFFER_SIZE) != ESP_OK) {
+        return -1;
+    }
     
-    while (*array_start) {
-        if (*array_start == '{') {
-            if (brace_level == 0 && !in_object) {
-                in_object = true;
-            }
-            brace_level++;
-        } else if (*array_start == '}') {
-            brace_level--;
-            if (brace_level == 0 && in_object) {
-                count++;
-                in_object = false;
-            }
+    char *bracket_pos = strchr(buffer, '[');
+    if (!bracket_pos) {
+        return -1;
+    }
+    
+    current_pos += (bracket_pos - buffer) + 1;
+    
+    // Find the nth object - increase search limit for large files
+    while (found_count <= n) {
+        long obj_pos = find_pattern_in_file(file, current_pos, "{", 10000000); // 10MB search limit
+        if (obj_pos == -1) {
+            return -1;
         }
         
-        // End of array
-        if (*array_start == ']' && brace_level == 0 && !in_object) {
+        if (found_count == n) {
+            return obj_pos;
+        }
+        
+        found_count++;
+        current_pos = obj_pos + 1;
+    }
+    
+    return -1;
+}
+
+/**
+ * Count objects in a JSON array more precisely
+ */
+static int count_objects_in_array(FILE *file, long array_start) {
+    char buffer[BUFFER_SIZE];
+    if (read_chunk_at_position(file, array_start, buffer, BUFFER_SIZE) != ESP_OK) {
+        return 0;
+    }
+    
+    char *bracket_pos = strchr(buffer, '[');
+    if (!bracket_pos) {
+        return 0;
+    }
+    
+    // Start after the opening bracket
+    long current_pos = array_start + (bracket_pos - buffer) + 1;
+    int count = 0;
+    
+    // Simply count all '{' characters until we hit the closing ']'
+    // This is simpler and more reliable than tracking brace levels
+    while (true) {
+        long object_pos = find_pattern_in_file(file, current_pos, "{", 10000000);
+        if (object_pos == -1) {
+            // No more objects found
+            ESP_LOGI(TAG, "No more '{' found after position %ld, ending count at %d", current_pos, count);
             break;
         }
         
-        array_start++;
-    }
-    
-    return count;
-}
-
-// Helper to extract a JSON object as a string
-static char* extract_object(const char* start) {
-    // Skip leading whitespace
-    while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r') {
-        start++;
-    }
-    
-    if (*start != '{') {
-        return NULL;
-    }
-    
-    int brace_count = 1;
-    const char* end = start + 1;
-    
-    while (*end && brace_count > 0) {
-        if (*end == '{') {
-            brace_count++;
-        } else if (*end == '}') {
-            brace_count--;
+        // Check if we've hit the end of the array (closing ']' before this object)
+        // Search a much larger distance ahead for the closing bracket
+        long search_distance = 50000; // Large enough to find the end of most arrays
+        long closing_bracket = find_pattern_in_file(file, current_pos, "]", search_distance);
+        if (closing_bracket != -1 && closing_bracket < object_pos) {
+            // Found closing bracket before next object, we're done
+            ESP_LOGI(TAG, "Found closing bracket at %ld before next object at %ld", closing_bracket, object_pos);
+            break;
         }
-        end++;
+        
+        count++;
+        current_pos = object_pos + 1;
+        
+        // Safety check for very large arrays
+        if (count > 10000) {
+            ESP_LOGW(TAG, "Array has more than 10000 objects, limiting to 10000");
+            break;
+        }
     }
     
-    if (brace_count != 0) {
-        // Unbalanced braces
-        return NULL;
-    }
-    
-    size_t len = end - start;
-    char* obj = malloc(len + 1);
-    if (!obj) {
-        return NULL;
-    }
-    
-    strncpy(obj, start, len);
-    obj[len] = '\0';
-    
-    return obj;
-}
-
-// Helper to find the beginning of an array
-static const char* find_array(const char* json, const char* key) {
-    char search_key[256];
-    sprintf(search_key, "\"%s\":", key);
-    
-    char* key_pos = strstr(json, search_key);
-    if (!key_pos) {
-        return NULL;
-    }
-    
-    // Move pointer to after key
-    key_pos += strlen(search_key);
-    
-    // Skip whitespace
-    while (*key_pos == ' ' || *key_pos == '\t' || *key_pos == '\n' || *key_pos == '\r') {
-        key_pos++;
-    }
-    
-    // Check if we have an array (starts with [)
-    if (*key_pos != '[') {
-        return NULL;
-    }
-    
-    return key_pos;
-}
-
-// Helper function to parse a file entry with all metadata
-static void parse_file_entry(const char *file_obj, file_entry_t *file_entry) {
-    // Initialize with defaults
-    memset(file_entry, 0, sizeof(file_entry_t));
-    file_entry->sample_rate = 44100;  // Default
-    file_entry->bit_depth = 16;       // Default
-    file_entry->channels = 2;         // Default
-    file_entry->folder_index = 0;     // Default
-    
-    // Parse name
-    char *name = extract_string(file_obj, "name");
-    if (name) {
-        strncpy(file_entry->name, name, sizeof(file_entry->name) - 1);
-        file_entry->name[sizeof(file_entry->name) - 1] = '\0';
-        free(name);
-    } else {
-        strncpy(file_entry->name, "unknown", sizeof(file_entry->name) - 1);
-    }
-    
-    // Parse path
-    char *path = extract_string(file_obj, "path");
-    if (path) {
-        strncpy(file_entry->path, path, sizeof(file_entry->path) - 1);
-        file_entry->path[sizeof(file_entry->path) - 1] = '\0';
-        free(path);
-    } else {
-        strncpy(file_entry->path, "", sizeof(file_entry->path) - 1);
-    }
-    
-    // Parse audio parameters
-    file_entry->sample_rate = extract_int(file_obj, "sampleRate");
-    file_entry->bit_depth = extract_int(file_obj, "bitDepth");
-    file_entry->channels = extract_int(file_obj, "channels");
-    file_entry->folder_index = extract_int(file_obj, "folderIndex");
-    
-    // Parse song metadata
-    char *song = extract_string(file_obj, "song");
-    if (song) {
-        strncpy(file_entry->song, song, sizeof(file_entry->song) - 1);
-        file_entry->song[sizeof(file_entry->song) - 1] = '\0';
-        free(song);
-    } else {
-        strncpy(file_entry->song, "Unknown Song", sizeof(file_entry->song) - 1);
-    }
-    
-    char *album = extract_string(file_obj, "album");
-    if (album) {
-        strncpy(file_entry->album, album, sizeof(file_entry->album) - 1);
-        file_entry->album[sizeof(file_entry->album) - 1] = '\0';
-        free(album);
-    } else {
-        strncpy(file_entry->album, "Unknown Album", sizeof(file_entry->album) - 1);
-    }
-    
-    char *artist = extract_string(file_obj, "artist");
-    if (artist) {
-        strncpy(file_entry->artist, artist, sizeof(file_entry->artist) - 1);
-        file_entry->artist[sizeof(file_entry->artist) - 1] = '\0';
-        free(artist);
-    } else {
-        strncpy(file_entry->artist, "Unknown Artist", sizeof(file_entry->artist) - 1);
-    }
+    ESP_LOGI(TAG, "Counted %d objects in array", count);
+    return count;
 }
 
 esp_err_t json_parse_index(const char *filepath, index_file_t *index) {
@@ -263,318 +252,219 @@ esp_err_t json_parse_index(const char *filepath, index_file_t *index) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "Attempting to open index file: %s", filepath);
+    ESP_LOGI(TAG, "Starting minimal memory streaming parse of: %s", filepath);
     
-    // Try to open the file directly
+    // Initialize index structure
+    memset(index, 0, sizeof(index_file_t));
+    strncpy(index->index_filepath, filepath, sizeof(index->index_filepath) - 1);
+    
     FILE *file = fopen(filepath, "rb");
-    
     if (!file) {
-        ESP_LOGE(TAG, "Failed to open index file: %s (errno: %d)", filepath, errno);
-        
-        // For debugging, list contents of the directory
-        const char* mount_point = sd_card_get_mount_point();
-        ESP_LOGI(TAG, "Listing directory contents of the SD card:");
-        DIR* dir = opendir(mount_point);
-        if (dir) {
-            struct dirent* entry;
-            while ((entry = readdir(dir)) != NULL) {
-                ESP_LOGI(TAG, "Found: %s", entry->d_name);
-            }
-            closedir(dir);
-            
-            // Check ESP32_MUSIC directory
-            char esp32_music_path[256];
-            snprintf(esp32_music_path, sizeof(esp32_music_path), "%s/ESP32_MUSIC", mount_point);
-            ESP_LOGI(TAG, "Checking directory: %s", esp32_music_path);
-            
-            dir = opendir(esp32_music_path);
-            if (dir) {
-                ESP_LOGI(TAG, "ESP32_MUSIC directory found, listing contents:");
-                while ((entry = readdir(dir)) != NULL) {
-                    ESP_LOGI(TAG, "Found in ESP32_MUSIC: %s", entry->d_name);
-                }
-                closedir(dir);
-            } else {
-                ESP_LOGE(TAG, "Failed to open ESP32_MUSIC directory (errno: %d)", errno);
-            }
-        } else {
-            ESP_LOGE(TAG, "Failed to open root directory (errno: %d)", errno);
-        }
-        
-        struct stat st;
-        if (stat(filepath, &st) == 0) {
-            ESP_LOGI(TAG, "File exists but could not be opened. Size: %lld bytes", st.st_size);
-        } else {
-            ESP_LOGE(TAG, "File does not exist or cannot be accessed (stat errno: %d)", errno);
-        }
+        ESP_LOGE(TAG, "Failed to open index file: %s", filepath);
         return ESP_FAIL;
     }
 
-    // Get file size
+    // Get file size for bounds checking
     fseek(file, 0, SEEK_END);
     long file_size = ftell(file);
     fseek(file, 0, SEEK_SET);
-
+    
     ESP_LOGI(TAG, "Index file size: %ld bytes", file_size);
-
-    if (file_size <= 0) {
-        ESP_LOGE(TAG, "Invalid index file size");
+    
+    // Find allFiles array position
+    long all_files_pos = find_pattern_in_file(file, 0, "\"allFiles\":", file_size);
+    if (all_files_pos == -1) {
+        ESP_LOGE(TAG, "Could not find allFiles array");
         fclose(file);
         return ESP_FAIL;
     }
-
-    // Allocate memory for the file content
-    char *file_content = (char *)malloc(file_size + 1);
-    if (!file_content) {
-        ESP_LOGE(TAG, "Failed to allocate memory for file content");
+    
+    ESP_LOGI(TAG, "Found allFiles array at position %ld", all_files_pos);
+    
+    // Count files
+    index->total_files = count_objects_in_array(file, all_files_pos);
+    if (index->total_files == 0) {
+        ESP_LOGE(TAG, "No files found in allFiles array");
+        fclose(file);
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "Found %d files, allocating position array (%lu bytes)", 
+             index->total_files, (unsigned long)(index->total_files * sizeof(long)));
+    
+    // Allocate ONLY the position arrays (minimal memory)
+    index->file_positions = malloc(index->total_files * sizeof(long));
+    if (!index->file_positions) {
+        ESP_LOGE(TAG, "Failed to allocate file positions array");
         fclose(file);
         return ESP_ERR_NO_MEM;
     }
-
-    // Read the file
-    size_t read_size = fread(file_content, 1, file_size, file);
+    
+    // Store positions of each file object
+    for (int i = 0; i < index->total_files; i++) {
+        long file_pos = find_nth_object_in_array(file, all_files_pos, i);
+        if (file_pos == -1) {
+            ESP_LOGE(TAG, "Could not find file %d", i);
+            free(index->file_positions);
+            fclose(file);
+            return ESP_FAIL;
+        }
+        index->file_positions[i] = file_pos;
+    }
+    
+    // Find musicFolders array position
+    long folders_pos = find_pattern_in_file(file, 0, "\"musicFolders\":", file_size);
+    if (folders_pos != -1) {
+        index->folder_count = count_objects_in_array(file, folders_pos);
+        
+        if (index->folder_count > 0) {
+            ESP_LOGI(TAG, "Found %d folders, allocating position array (%lu bytes)", 
+                     index->folder_count, (unsigned long)(index->folder_count * sizeof(long)));
+            
+            index->folder_positions = malloc(index->folder_count * sizeof(long));
+            if (!index->folder_positions) {
+                ESP_LOGE(TAG, "Failed to allocate folder positions array");
+                free(index->file_positions);
+                fclose(file);
+                return ESP_ERR_NO_MEM;
+            }
+            
+            // Store positions of each folder object
+            for (int i = 0; i < index->folder_count; i++) {
+                long folder_pos = find_nth_object_in_array(file, folders_pos, i);
+                if (folder_pos == -1) {
+                    ESP_LOGE(TAG, "Could not find folder %d", i);
+                    free(index->file_positions);
+                    free(index->folder_positions);
+                    fclose(file);
+                    return ESP_FAIL;
+                }
+                index->folder_positions[i] = folder_pos;
+            }
+        }
+    } else {
+        ESP_LOGI(TAG, "No musicFolders array found");
+        index->folder_count = 0;
+        index->folder_positions = NULL;
+    }
+    
     fclose(file);
     
-    if (read_size != file_size) {
-        ESP_LOGE(TAG, "Failed to read file content");
-        free(file_content);
+    ESP_LOGI(TAG, "Successfully parsed index with %d files and %d folders (minimal memory mode)", 
+             index->total_files, index->folder_count);
+    
+    return ESP_OK;
+}
+
+esp_err_t json_get_file_entry(const index_file_t *index, int file_index, file_entry_t *file_entry) {
+    if (!index || !file_entry || file_index < 0 || file_index >= index->total_files) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    FILE *file = fopen(index->index_filepath, "rb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open index file for reading file entry");
         return ESP_FAIL;
     }
-
-    // Null-terminate the string
-    file_content[file_size] = '\0';
-
-    // Print a small portion of the file content to verify
-    ESP_LOGI(TAG, "File content preview (first 100 chars): %.100s", file_content);
-
-    // Parse version
-    char *version_str = extract_string(file_content, "version");
-    if (version_str) {
-        strncpy(index->version, version_str, sizeof(index->version) - 1);
-        index->version[sizeof(index->version) - 1] = '\0';
-        free(version_str);
-    } else {
-        strncpy(index->version, "1.0", sizeof(index->version) - 1);
+    
+    // Read a chunk around the file position
+    char buffer[BUFFER_SIZE * 2]; // Larger buffer for file objects
+    long file_pos = index->file_positions[file_index];
+    
+    if (read_chunk_at_position(file, file_pos, buffer, sizeof(buffer)) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read file entry at position %ld", file_pos);
+        fclose(file);
+        return ESP_FAIL;
     }
     
-    // Parse totalFiles
-    index->total_files = extract_int(file_content, "totalFiles");
-
-    // Parse allFiles array
-    const char *all_files_array = find_array(file_content, "allFiles");
-    if (all_files_array) {
-        int files_count = get_array_size(all_files_array);
-        index->total_files = files_count;  // Update with actual count
-        
-        // Allocate memory for files
-        index->all_files = (file_entry_t *)malloc(sizeof(file_entry_t) * files_count);
-        if (!index->all_files) {
-            ESP_LOGE(TAG, "Failed to allocate memory for all_files");
-            free(file_content);
-            return ESP_ERR_NO_MEM;
-        }
-        
-        // Parse each file entry
-        const char *pos = all_files_array + 1;  // Skip opening bracket
-        for (int i = 0; i < files_count; i++) {
-            // Find next object
-            while (*pos && (*pos != '{')) {
-                pos++;
-            }
-            
-            if (!*pos) break;  // End of string
-            
-            // Extract object
-            char *obj = extract_object(pos);
-            if (obj) {
-                parse_file_entry(obj, &index->all_files[i]);
-                
-                free(obj);
-                
-                // Move to end of object
-                while (*pos && (*pos != '}')) {
-                    pos++;
-                }
-                
-                if (*pos) pos++;  // Skip closing brace
-            }
-        }
-    } else {
-        index->all_files = NULL;
-        index->total_files = 0;
-    }
-
-    // Parse musicFolders array
-    const char *folders_array = find_array(file_content, "musicFolders");
-    if (folders_array) {
-        int folders_count = get_array_size(folders_array);
-        index->folder_count = folders_count;
-        
-        // Allocate memory for folders
-        index->music_folders = (folder_t *)malloc(sizeof(folder_t) * folders_count);
-        if (!index->music_folders) {
-            ESP_LOGE(TAG, "Failed to allocate memory for music_folders");
-            if (index->all_files) free(index->all_files);
-            free(file_content);
-            return ESP_ERR_NO_MEM;
-        }
-        
-        // Parse each folder entry
-        const char *pos = folders_array + 1;  // Skip opening bracket
-        for (int i = 0; i < folders_count; i++) {
-            ESP_LOGI(TAG, "Parsing folder %d", i);
-            
-            // Find next object
-            while (*pos && (*pos != '{')) {
-                pos++;
-            }
-            
-            if (!*pos) {
-                ESP_LOGW(TAG, "No opening brace found for folder %d", i);
-                break;  // End of string
-            }
-            
-            // Extract object
-            char *folder_obj = extract_object(pos);
-            if (folder_obj) {
-                ESP_LOGI(TAG, "Folder object %d: %.100s...", i, folder_obj);
-                
-                char *name = extract_string(folder_obj, "name");
-                if (name) {
-                    ESP_LOGI(TAG, "Found folder name: %s", name);
-                    strncpy(index->music_folders[i].name, name, sizeof(index->music_folders[i].name) - 1);
-                    index->music_folders[i].name[sizeof(index->music_folders[i].name) - 1] = '\0';
-                    free(name);
-                } else {
-                    ESP_LOGW(TAG, "No name found for folder %d", i);
-                    strncpy(index->music_folders[i].name, "unknown", sizeof(index->music_folders[i].name) - 1);
-                }
-                
-                // Find files array in folder
-                const char *files_array = find_array(folder_obj, "files");
-                if (files_array) {
-                    int files_count = get_array_size(files_array);
-                    index->music_folders[i].file_count = files_count;
-                    
-                    // Allocate memory for folder files
-                    index->music_folders[i].files = (file_entry_t *)malloc(sizeof(file_entry_t) * files_count);
-                    if (!index->music_folders[i].files) {
-                        ESP_LOGE(TAG, "Failed to allocate memory for folder files");
-                        // Clean up previously allocated folders
-                        for (int j = 0; j < i; j++) {
-                            if (index->music_folders[j].files) {
-                                free(index->music_folders[j].files);
-                            }
-                        }
-                        if (index->music_folders) free(index->music_folders);
-                        if (index->all_files) free(index->all_files);
-                        free(folder_obj);
-                        free(file_content);
-                        return ESP_ERR_NO_MEM;
-                    }
-                    
-                    // Parse each file in folder
-                    const char *file_pos = files_array + 1;  // Skip opening bracket
-                    for (int j = 0; j < files_count; j++) {
-                        // Find next object
-                        while (*file_pos && (*file_pos != '{')) {
-                            file_pos++;
-                        }
-                        
-                        if (!*file_pos) break;  // End of string
-                        
-                        // Extract object
-                        char *file_obj = extract_object(file_pos);
-                        if (file_obj) {
-                            parse_file_entry(file_obj, &index->music_folders[i].files[j]);
-                            
-                            free(file_obj);
-                            
-                            // Move to end of object
-                            while (*file_pos && (*file_pos != '}')) {
-                                file_pos++;
-                            }
-                            
-                            if (*file_pos) file_pos++;  // Skip closing brace
-                        }
-                    }
-                } else {
-                    index->music_folders[i].files = NULL;
-                    index->music_folders[i].file_count = 0;
-                }
-                
-                free(folder_obj);
-                
-                // Move to end of the extracted object
-                int brace_count = 1;
-                pos++; // Move past the opening brace we found
-                while (*pos && brace_count > 0) {
-                    if (*pos == '{') {
-                        brace_count++;
-                    } else if (*pos == '}') {
-                        brace_count--;
-                    }
-                    pos++;
-                }
-            } else {
-                // If extract_object failed, try to skip this malformed object
-                int brace_count = 1;
-                pos++;
-                while (*pos && brace_count > 0) {
-                    if (*pos == '{') {
-                        brace_count++;
-                    } else if (*pos == '}') {
-                        brace_count--;
-                    }
-                    pos++;
-                }
-            }
-        }
-    } else {
-        index->music_folders = NULL;
-        index->folder_count = 0;
-    }
-
-    // Cleanup
-    free(file_content);
-    ESP_LOGI(TAG, "Index file successfully parsed");
+    // Initialize with defaults
+    memset(file_entry, 0, sizeof(file_entry_t));
+    file_entry->folder_index = -1;
     
+    // Extract values from buffer
+    extract_string_from_buffer(buffer, "name", file_entry->name, sizeof(file_entry->name));
+    extract_string_from_buffer(buffer, "path", file_entry->path, sizeof(file_entry->path));
+    extract_string_from_buffer(buffer, "song", file_entry->song, sizeof(file_entry->song));
+    extract_string_from_buffer(buffer, "album", file_entry->album, sizeof(file_entry->album));
+    extract_string_from_buffer(buffer, "artist", file_entry->artist, sizeof(file_entry->artist));
+    
+    file_entry->sample_rate = extract_int_from_buffer(buffer, "sampleRate");
+    file_entry->bit_depth = extract_int_from_buffer(buffer, "bitDepth");
+    file_entry->channels = extract_int_from_buffer(buffer, "channels");
+    file_entry->folder_index = extract_int_from_buffer(buffer, "folderIndex");
+    
+    fclose(file);
+    return ESP_OK;
+}
+
+esp_err_t json_get_folder_entry(const index_file_t *index, int folder_index, folder_t *folder) {
+    if (!index || !folder || folder_index < 0 || folder_index >= index->folder_count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    FILE *file = fopen(index->index_filepath, "rb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open index file for reading folder entry");
+        return ESP_FAIL;
+    }
+    
+    // Read a chunk around the folder position
+    char buffer[BUFFER_SIZE];
+    long folder_pos = index->folder_positions[folder_index];
+    
+    if (read_chunk_at_position(file, folder_pos, buffer, sizeof(buffer)) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read folder entry at position %ld", folder_pos);
+        fclose(file);
+        return ESP_FAIL;
+    }
+    
+    // Initialize with defaults
+    memset(folder, 0, sizeof(folder_t));
+    
+    // Extract values from buffer
+    extract_string_from_buffer(buffer, "name", folder->name, sizeof(folder->name));
+    folder->file_count = extract_int_from_buffer(buffer, "fileCount");
+    folder->first_file_index = extract_int_from_buffer(buffer, "firstFileIndex");
+    
+    fclose(file);
     return ESP_OK;
 }
 
 esp_err_t json_free_index(index_file_t *index) {
-    if (index == NULL) {
+    if (!index) {
         return ESP_ERR_INVALID_ARG;
     }
-
-    // Free all files
-    if (index->all_files != NULL) {
-        free(index->all_files);
-        index->all_files = NULL;
+    
+    if (index->file_positions) {
+        free(index->file_positions);
+        index->file_positions = NULL;
     }
-
-    // Free folders and their files
-    if (index->music_folders != NULL) {
-        for (int i = 0; i < index->folder_count; i++) {
-            if (index->music_folders[i].files != NULL) {
-                free(index->music_folders[i].files);
-                index->music_folders[i].files = NULL;
-            }
-        }
-        free(index->music_folders);
-        index->music_folders = NULL;
+    
+    if (index->folder_positions) {
+        free(index->folder_positions);
+        index->folder_positions = NULL;
     }
-
+    
+    memset(index, 0, sizeof(index_file_t));
     return ESP_OK;
 }
 
 esp_err_t json_get_full_path(const char *relative_path, char *full_path, size_t max_len) {
-    if (relative_path == NULL || full_path == NULL) {
+    if (!relative_path || !full_path) {
         return ESP_ERR_INVALID_ARG;
     }
-
-    const char *mount_point = sd_card_get_mount_point();
-    snprintf(full_path, max_len, "%s%s/%s", mount_point, ESP32_MUSIC_DIR, relative_path);
     
+    const char *mount_point = sd_card_get_mount_point();
+    if (!mount_point) {
+        return ESP_FAIL;
+    }
+    
+    // Handle paths that start with "ESP32_MUSIC/" by removing it
+    const char *clean_path = relative_path;
+    if (strncmp(relative_path, "ESP32_MUSIC/", 12) == 0) {
+        clean_path = relative_path + 12;
+    }
+    
+    snprintf(full_path, max_len, "%s%s/%s", mount_point, ESP32_MUSIC_DIR, clean_path);
     return ESP_OK;
 }

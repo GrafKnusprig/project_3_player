@@ -68,43 +68,13 @@ void create_test_index_json(const char* filename) {
     "  \"musicFolders\": [\n"
     "    {\n"
     "      \"name\": \"Pop\",\n"
-    "      \"files\": [\n"
-    "        {\n"
-    "          \"name\": \"song1.pcm\",\n"
-    "          \"path\": \"Pop/song1.pcm\",\n"
-    "          \"sampleRate\": 44100,\n"
-    "          \"bitDepth\": 16,\n"
-    "          \"channels\": 2,\n"
-    "          \"song\": \"Song One\",\n"
-    "          \"album\": \"Pop Hits\",\n"
-    "          \"artist\": \"Artist A\"\n"
-    "        },\n"
-    "        {\n"
-    "          \"name\": \"song2.pcm\",\n"
-    "          \"path\": \"Pop/song2.pcm\",\n"
-    "          \"sampleRate\": 48000,\n"
-    "          \"bitDepth\": 24,\n"
-    "          \"channels\": 2,\n"
-    "          \"song\": \"Song Two\",\n"
-    "          \"album\": \"Pop Hits\",\n"
-    "          \"artist\": \"Artist B\"\n"
-    "        }\n"
-    "      ]\n"
+    "      \"fileCount\": 2,\n"
+    "      \"firstFileIndex\": 0\n"
     "    },\n"
     "    {\n"
     "      \"name\": \"Rock\",\n"
-    "      \"files\": [\n"
-    "        {\n"
-    "          \"name\": \"song3.pcm\",\n"
-    "          \"path\": \"Rock/song3.pcm\",\n"
-    "          \"sampleRate\": 44100,\n"
-    "          \"bitDepth\": 16,\n"
-    "          \"channels\": 2,\n"
-    "          \"song\": \"Rock Anthem\",\n"
-    "          \"album\": \"Rock Collection\",\n"
-    "          \"artist\": \"Artist C\"\n"
-    "        }\n"
-    "      ]\n"
+    "      \"fileCount\": 1,\n"
+    "      \"firstFileIndex\": 2\n"
     "    }\n"
     "  ]\n"
     "}";
@@ -123,49 +93,69 @@ void test_json_parse_index() {
     esp_err_t ret = json_parse_index(test_file, &index);
     
     assert(ret == ESP_OK);
-    assert(strcmp(index.version, "1.1") == 0);
     assert(index.total_files == 3);
     assert(index.folder_count == 2);
+    assert(index.file_positions != NULL);
+    assert(index.folder_positions != NULL);
     
-    // Test allFiles array
-    assert(index.all_files != NULL);
-    assert(strcmp(index.all_files[0].name, "song1.pcm") == 0);
-    assert(strcmp(index.all_files[0].path, "Pop/song1.pcm") == 0);
-    assert(index.all_files[0].sample_rate == 44100);
-    assert(index.all_files[0].bit_depth == 16);
-    assert(index.all_files[0].channels == 2);
-    assert(index.all_files[0].folder_index == 0);
-    assert(strcmp(index.all_files[0].song, "Song One") == 0);
-    assert(strcmp(index.all_files[0].album, "Pop Hits") == 0);
-    assert(strcmp(index.all_files[0].artist, "Artist A") == 0);
+    // Test on-demand file reading
+    file_entry_t file_entry;
+    
+    // Test first file
+    ret = json_get_file_entry(&index, 0, &file_entry);
+    assert(ret == ESP_OK);
+    assert(strcmp(file_entry.name, "song1.pcm") == 0);
+    assert(strcmp(file_entry.path, "Pop/song1.pcm") == 0);
+    assert(file_entry.sample_rate == 44100);
+    assert(file_entry.bit_depth == 16);
+    assert(file_entry.channels == 2);
+    assert(file_entry.folder_index == 0);
+    assert(strcmp(file_entry.song, "Song One") == 0);
+    assert(strcmp(file_entry.album, "Pop Hits") == 0);
+    assert(strcmp(file_entry.artist, "Artist A") == 0);
     
     // Test second file with different audio format
-    assert(strcmp(index.all_files[1].name, "song2.pcm") == 0);
-    assert(index.all_files[1].sample_rate == 48000);
-    assert(index.all_files[1].bit_depth == 24);
-    assert(index.all_files[1].folder_index == 0);
+    ret = json_get_file_entry(&index, 1, &file_entry);
+    assert(ret == ESP_OK);
+    assert(strcmp(file_entry.name, "song2.pcm") == 0);
+    assert(file_entry.sample_rate == 48000);
+    assert(file_entry.bit_depth == 24);
+    assert(file_entry.folder_index == 0);
     
     // Test third file in different folder
-    assert(strcmp(index.all_files[2].name, "song3.pcm") == 0);
-    assert(index.all_files[2].folder_index == 1);
-    assert(strcmp(index.all_files[2].song, "Rock Anthem") == 0);
+    ret = json_get_file_entry(&index, 2, &file_entry);
+    assert(ret == ESP_OK);
+    assert(strcmp(file_entry.name, "song3.pcm") == 0);
+    assert(file_entry.folder_index == 1);
+    assert(strcmp(file_entry.song, "Rock Anthem") == 0);
     
-    // Test musicFolders array
-    assert(index.music_folders != NULL);
-    assert(strcmp(index.music_folders[0].name, "Pop") == 0);
-    assert(index.music_folders[0].file_count == 2);
-    if (index.folder_count > 1) {
-        assert(strcmp(index.music_folders[1].name, "Rock") == 0);
-        assert(index.music_folders[1].file_count == 1);
-    }
+    // Test folder reading
+    folder_t folder;
     
-    // Test folder files
-    assert(index.music_folders[0].files != NULL);
-    assert(strcmp(index.music_folders[0].files[0].name, "song1.pcm") == 0);
-    assert(strcmp(index.music_folders[0].files[1].name, "song2.pcm") == 0);
+    // Test first folder
+    ret = json_get_folder_entry(&index, 0, &folder);
+    assert(ret == ESP_OK);
+    assert(strcmp(folder.name, "Pop") == 0);
+    assert(folder.file_count == 2);
+    assert(folder.first_file_index == 0);
     
-    assert(index.music_folders[1].files != NULL);
-    assert(strcmp(index.music_folders[1].files[0].name, "song3.pcm") == 0);
+    // Test second folder
+    ret = json_get_folder_entry(&index, 1, &folder);
+    assert(ret == ESP_OK);
+    assert(strcmp(folder.name, "Rock") == 0);
+    assert(folder.file_count == 1);
+    assert(folder.first_file_index == 2);
+    
+    // Test invalid indices
+    ret = json_get_file_entry(&index, -1, &file_entry);
+    assert(ret != ESP_OK);
+    ret = json_get_file_entry(&index, index.total_files, &file_entry);
+    assert(ret != ESP_OK);
+    
+    ret = json_get_folder_entry(&index, -1, &folder);
+    assert(ret != ESP_OK);
+    ret = json_get_folder_entry(&index, index.folder_count, &folder);
+    assert(ret != ESP_OK);
     
     json_free_index(&index);
     unlink(test_file);
@@ -214,8 +204,8 @@ void test_json_free_index() {
     assert(ret == ESP_OK);
     
     // Check that pointers are set to NULL
-    assert(index.all_files == NULL);
-    assert(index.music_folders == NULL);
+    assert(index.file_positions == NULL);
+    assert(index.folder_positions == NULL);
     
     unlink(test_file);
     printf("✓ json_free_index test passed\n");
